@@ -61,3 +61,33 @@ Todo en `app/obras/[id]/planificacion/page.tsx` (reescrito, mismos componentes `
 ## Verificación
 - `npx tsc --noEmit` limpio. `npm run build` OK (ruta planificacion 7.13 kB, sin deps nuevas).
 - Intacto de tarea 5: autosave, plata por mes, total por fila 100%, columnas/encabezado fijos, rubros colapsables.
+
+---
+
+## Séptima tarea (misma sesión): Sub-solapas en Planificación
+
+**Contexto:** tarea estructural para preparar el lugar de la futura explosión de insumos, sin cambiar
+el comportamiento de lo que ya existía.
+
+**Lo que se hizo (en `app/obras/[id]/planificacion/page.tsx`):**
+- La pestaña Planificación pasó a ser un contenedor con dos sub-solapas, **replicando el mismo patrón
+  de sub-solapas de Presupuesto** (array `SUBTABS` con `{id,label}`, estado `useState` con default en la
+  primera, botones con `borderBottom: 2px solid #1A1A2E` para la activa). No se inventó un sistema nuevo.
+- **"Cronograma"** (default): contiene TODO lo que antes se mostraba directo — `ConfigBar`, aviso de error
+  de config, texto de ayuda y `Grilla` (grilla de %, incidencia, plata por mes, curva). Se movió tal cual,
+  sin tocar su lógica ni su apariencia interna.
+- **"Explosión de insumos"**: placeholder simple ("Explosión de insumos — en construcción"). No se
+  construyó nada de la explosión todavía.
+
+**Decisiones:**
+- Se usó render condicional por sub-solapa (igual que Presupuesto), no CSS hide. Al cambiar de solapa,
+  `Grilla` se desmonta y su estado local (colapsados/foco/borradores) se pierde; es comportamiento normal
+  de tabs y no afecta datos (todo está autosalvado y se re-siembra del server al volver a Cronograma).
+- El estado `subtab` vive en la página, junto a `modo`/`configError`.
+
+**Verificación:** `npx tsc --noEmit` limpio, `npm run build` OK (ruta planificacion 7.35 kB, sin deps
+nuevas). La grilla funciona idéntico bajo "Cronograma"; "Explosión de insumos" muestra el placeholder;
+"Cronograma" es la solapa activa por defecto.
+
+**Archivos tocados:** `app/obras/[id]/planificacion/page.tsx` (+ `SubTabId`/`SUBTABS`, sub-solapas,
+placeholder).

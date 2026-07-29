@@ -1179,11 +1179,20 @@ function Grilla({
 
 /* ─── Página ───────────────────────────────────────────────────────────────── */
 
+// Sub-solapas internas de Planificación (mismo patrón que las de Presupuesto).
+type SubTabId = 'cronograma' | 'explosion';
+
+const SUBTABS: { id: SubTabId; label: string }[] = [
+  { id: 'cronograma', label: 'Cronograma' },
+  { id: 'explosion', label: 'Explosión de insumos' },
+];
+
 export default function PlanificacionPage() {
   const params = useParams();
   const obraId = params.id as string;
   const { datos, cargando, error, guardarCelda, guardarConfiguracion } = usePlanificacion(obraId);
 
+  const [subtab, setSubtab] = useState<SubTabId>('cronograma');
   const [modo, setModo] = useState<Modo>('relativo');
   const [configError, setConfigError] = useState<string | null>(null);
 
@@ -1258,38 +1267,73 @@ export default function PlanificacionPage() {
 
         {datos && !error && (
           <>
-            {/* Barra de configuración: fecha de inicio + plazo + modo de encabezado */}
-            <ConfigBar
-              fechaInicioServer={datos.fecha_inicio || ''}
-              plazoServer={datos.plazo_meses ?? 0}
-              topeConDatos={topeConDatos}
-              modo={modo}
-              setModo={setModo}
-              totalCostoCosto={datos.total_costo_costo}
-              guardarConfiguracion={guardarConfiguracion}
-              onError={setConfigError}
-            />
+            {/* Sub-pestañas internas — mismo patrón visual que Presupuesto */}
+            <div className="flex gap-6 px-1">
+              {SUBTABS.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setSubtab(t.id)}
+                  className="text-sm pb-2 transition-colors"
+                  style={{
+                    color: subtab === t.id ? '#1A1A2E' : '#6B7080',
+                    fontWeight: subtab === t.id ? 600 : 500,
+                    borderBottom: subtab === t.id ? '2px solid #1A1A2E' : '2px solid transparent',
+                  }}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
 
-            {configError && (
-              <div
-                className="p-3 rounded-2xl"
-                style={{
-                  background: 'rgba(239, 68, 68, 0.12)',
-                  border: '1px solid rgba(239, 68, 68, 0.30)',
-                }}
-              >
-                <p style={{ color: '#DC2626' }} className="text-sm font-medium">
-                  {configError}
+            {/* Cronograma: todo lo que ya existía (grilla, incidencia, config, plata por mes, curva) */}
+            {subtab === 'cronograma' && (
+              <>
+                {/* Barra de configuración: fecha de inicio + plazo + modo de encabezado */}
+                <ConfigBar
+                  fechaInicioServer={datos.fecha_inicio || ''}
+                  plazoServer={datos.plazo_meses ?? 0}
+                  topeConDatos={topeConDatos}
+                  modo={modo}
+                  setModo={setModo}
+                  totalCostoCosto={datos.total_costo_costo}
+                  guardarConfiguracion={guardarConfiguracion}
+                  onError={setConfigError}
+                />
+
+                {configError && (
+                  <div
+                    className="p-3 rounded-2xl"
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.12)',
+                      border: '1px solid rgba(239, 68, 68, 0.30)',
+                    }}
+                  >
+                    <p style={{ color: '#DC2626' }} className="text-sm font-medium">
+                      {configError}
+                    </p>
+                  </div>
+                )}
+
+                <p className="text-xs px-1" style={{ color: '#9CA3AF' }}>
+                  Cargá el % de avance físico de cada ítem por mes. Se guarda solo al salir de la celda. La
+                  suma por fila debería llegar a 100%.
+                </p>
+
+                <Grilla datos={datos} guardarCelda={guardarCelda} modo={modo} />
+              </>
+            )}
+
+            {/* Explosión de insumos: placeholder — se construye en tareas siguientes */}
+            {subtab === 'explosion' && (
+              <div style={GLASS_CARD} className="p-6">
+                <p className="text-sm font-medium" style={{ color: '#1A1A2E' }}>
+                  Explosión de insumos — en construcción
+                </p>
+                <p className="text-sm mt-2" style={{ color: '#6B7080' }}>
+                  Acá va a ir el detalle de insumos derivado del cronograma. Próximamente.
                 </p>
               </div>
             )}
-
-            <p className="text-xs px-1" style={{ color: '#9CA3AF' }}>
-              Cargá el % de avance físico de cada ítem por mes. Se guarda solo al salir de la celda. La suma
-              por fila debería llegar a 100%.
-            </p>
-
-            <Grilla datos={datos} guardarCelda={guardarCelda} modo={modo} />
           </>
         )}
       </div>
