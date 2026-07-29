@@ -35,8 +35,13 @@ const BG_RUBRO_LEFT = 'rgba(236, 240, 224, 0.97)';
 const BG_RUBRO = 'rgba(200, 230, 76, 0.10)';
 
 const ANCHO_ITEM = 260;
+const ANCHO_INCID = 82; // columna angosta de incidencia, fija junto a la de ítems
 const ANCHO_MES = 92;
 const ANCHO_TOTAL = 104;
+
+// left de la columna de incidencia = justo después de la de ítems (deben coincidir
+// con el ancho renderizado de la columna de ítems para que queden pegadas al fijar).
+const LEFT_INCID = ANCHO_ITEM;
 
 /* ─── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -48,9 +53,31 @@ function formatNum(v: number) {
   return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 2 }).format(v);
 }
 
+/* Porcentaje con un decimal (ej: "56,4%"). */
+function formatPct1(v: number) {
+  return (
+    new Intl.NumberFormat('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(v) + '%'
+  );
+}
+
 type Estado = 'guardando' | 'guardado' | 'error';
+type Modo = 'relativo' | 'calendario';
 
 const claveCelda = (itemId: string, mes: number) => `${itemId}::${mes}`;
+
+const MESES_ABBR = [
+  'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic',
+];
+
+/* Etiqueta calendario del mes relativo N = fecha_inicio + (N-1) meses. Solo es una
+ * etiqueta de presentación: el índice guardado en la BD sigue siendo N (relativo). */
+function etiquetaMesCalendario(fechaInicio: string, mes: number): string {
+  const base = fechaInicio.slice(0, 10);
+  const [y, m] = base.split('-').map(Number);
+  if (!y || !m) return `Mes ${mes}`;
+  const d = new Date(y, m - 1 + (mes - 1), 1);
+  return `${MESES_ABBR[d.getMonth()]} ${d.getFullYear()}`;
+}
 
 function pctDesdeTexto(texto: string): number {
   const limpio = texto.trim();
@@ -84,6 +111,281 @@ function semillaDesdeDatos(datos: PlanificacionResponse): {
     }
   }
   return { valores, guardados };
+}
+
+/* Mes más alto (relativo) con avance cargado en el servidor. Sirve para avisar
+ * antes de recortar el plazo por debajo de datos ya guardados. */
+function maxMesConDatos(datos: PlanificacionResponse): number {
+  let max = 0;
+  for (const rubro of datos.rubros) {
+    for (const item of rubro.items) {
+      for (const p of item.planificacion) {
+        if (Number(p.pct_plan) > 0 && p.mes > max) max = p.mes;
+      }
+    }
+  }
+  return max;
+}
+
+/* ─── Barra de configuración (fecha de inicio + plazo + modo de encabezado) ──── */
+
+function ConfigBar({
+  fechaInicioServer,
+  plazoServer,
+  topeConDatos,
+  modo,
+  setModo,
+  totalCostoCosto,
+  guardarConfiguracion,
+  onError,
+}: {
+  fechaInicioServer: string;
+  plazoServer: number;
+  topeConDatos: number;
+  modo: Modo;
+  setModo: (m: Modo) => void;
+  totalCostoCosto: number;
+  guardarConfiguracion: (plazo: number | null, fecha: string) => Promise<void>;
+  onError: (msg: string | null) => void;
+}) {
+  const fechaBase = fechaInicioServer ? fechaInicioServer.slice(0, 10) : '';
+  const [fecha, setFecha] = useState(fechaBase);
+  const [plazoTexto, setPlazoTexto] = useState(plazoServer > 0 ? String(plazoServer) : '');
+  const [guardando, setGuardando] = useState(false);
+  const [confirmPlazo, setConfirmPlazo] = useState<number | null>(null);
+
+  // Resincronizar cuando el servidor devuelve valores nuevos (tras persistir).
+  useEffect(() => {
+    setFecha(fechaInicioServer ? fechaInicioServer.slice(0, 10) : '');
+  }, [fechaInicioServer]);
+  useEffect(() => {
+    setPlazoTexto(plazoServer > 0 ? String(plazoServer) : '');
+  }, [plazoServer]);
+
+  const persistir = useCallback(
+    async (plazo: number, nuevaFecha: string) => {
+      setGuardando(true);
+      onError(null);
+      try {
+        await guardarConfiguracion(plazo, nuevaFecha);
+      } catch (e) {
+        onError(e instanceof Error ? e.message : 'No se pudo guardar la configuración de la obra');
+      } finally {
+        setGuardando(false);
+      }
+    },
+    [guardarConfiguracion, onError],
+  );
+
+  // Cambio de fecha: reetiqueta, no toca los porcentajes ni el plazo guardado.
+  const cambiarFecha = useCallback(
+    (nueva: string) => {
+      setFecha(nueva);
+      if (!nueva && modo === 'calendario') setModo('relativo');
+      void persistir(plazoServer, nueva);
+    },
+    [modo, plazoServer, persistir, setModo],
+  );
+
+  // Aplica un plazo nuevo; si recorta por debajo de datos guardados, primero avisa.
+  const aplicarPlazo = useCallback(
+    (nuevo: number) => {
+      if (!Number.isFinite(nuevo) || nuevo < 1) {
+        setPlazoTexto(plazoServer > 0 ? String(plazoServer) : '');
+        return;
+      }
+      if (nuevo === plazoServer) {
+        setPlazoTexto(String(nuevo));
+        return;
+      }
+      if (nuevo < topeConDatos) {
+        setConfirmPlazo(nuevo); // hay avance en meses que quedarían fuera → confirmar
+        return;
+      }
+      void persistir(nuevo, fecha);
+    },
+    [plazoServer, topeConDatos, fecha, persistir],
+  );
+
+  const incBase = plazoServer > 0 ? plazoServer : 0;
+  const labelCls = 'text-[11px] font-semibold uppercase tracking-wide';
+  const stepBtn: React.CSSProperties = {
+    width: 30,
+    height: 34,
+    borderRadius: 8,
+    border: '1px solid rgba(0,0,0,0.12)',
+    background: 'rgba(255,255,255,0.6)',
+    color: '#1A1A2E',
+    fontSize: 16,
+    lineHeight: '1',
+    fontWeight: 600,
+  };
+
+  return (
+    <div style={GLASS_CARD} className="px-5 py-3 flex flex-wrap items-end gap-x-7 gap-y-3">
+      {/* Fecha de inicio */}
+      <div className="flex flex-col gap-1">
+        <span className={labelCls} style={{ color: '#9CA3AF' }}>
+          Fecha de inicio
+        </span>
+        <input
+          type="date"
+          value={fecha}
+          onChange={(e) => cambiarFecha(e.target.value)}
+          className="text-sm rounded-[10px] px-3 py-2 focus:outline-none"
+          style={{
+            border: '1px solid rgba(0,0,0,0.12)',
+            background: 'rgba(255,255,255,0.6)',
+            color: '#1A1A2E',
+            minWidth: 150,
+          }}
+        />
+      </div>
+
+      {/* Plazo en meses con stepper */}
+      <div className="flex flex-col gap-1">
+        <span className={labelCls} style={{ color: '#9CA3AF' }}>
+          Plazo (meses)
+        </span>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => aplicarPlazo((plazoServer > 0 ? plazoServer : 1) - 1)}
+            disabled={plazoServer <= 1}
+            style={{ ...stepBtn, opacity: plazoServer <= 1 ? 0.4 : 1 }}
+            className="hover:bg-black/[0.04] transition-colors disabled:cursor-not-allowed"
+            aria-label="Quitar un mes"
+          >
+            −
+          </button>
+          <input
+            type="number"
+            min="1"
+            value={plazoTexto}
+            onChange={(e) => setPlazoTexto(e.target.value)}
+            onBlur={() => aplicarPlazo(parseInt(plazoTexto, 10))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            placeholder="1"
+            className="text-sm text-center font-mono tabular-nums rounded-[10px] px-2 py-2 focus:outline-none"
+            style={{
+              border: '1px solid rgba(0,0,0,0.12)',
+              background: 'rgba(255,255,255,0.6)',
+              color: '#1A1A2E',
+              width: 64,
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => aplicarPlazo(incBase + 1)}
+            style={stepBtn}
+            className="hover:bg-black/[0.04] transition-colors"
+            aria-label="Agregar un mes"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      {/* Modo de encabezado */}
+      <div className="flex flex-col gap-1">
+        <span className={labelCls} style={{ color: '#9CA3AF' }}>
+          Encabezados
+        </span>
+        <div
+          className="flex rounded-[10px] p-0.5"
+          style={{ border: '1px solid rgba(0,0,0,0.12)', background: 'rgba(255,255,255,0.5)' }}
+        >
+          {(['relativo', 'calendario'] as const).map((m) => {
+            const activo = modo === m;
+            const deshabilitado = m === 'calendario' && !fecha;
+            return (
+              <button
+                key={m}
+                type="button"
+                disabled={deshabilitado}
+                onClick={() => setModo(m)}
+                title={
+                  deshabilitado ? 'Cargá una fecha de inicio para usar el modo calendario' : undefined
+                }
+                className="text-xs font-semibold px-3 py-1.5 rounded-[8px] transition-colors disabled:cursor-not-allowed"
+                style={{
+                  background: activo ? '#C8E64C' : 'transparent',
+                  color: deshabilitado ? '#C4C4CC' : activo ? '#2A3300' : '#6B7080',
+                }}
+              >
+                {m === 'relativo' ? 'Relativo' : 'Calendario'}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex-1" />
+
+      {guardando && (
+        <span className="text-xs pb-2" style={{ color: '#6B7080' }}>
+          Guardando…
+        </span>
+      )}
+
+      {/* Total costo-costo (referencia) */}
+      <div className="flex flex-col gap-1 items-end pb-0.5">
+        <span className={labelCls} style={{ color: '#9CA3AF' }}>
+          Total costo-costo
+        </span>
+        <span className="text-base font-bold font-mono tabular-nums" style={{ color: '#1A1A2E' }}>
+          {formatPrecio(totalCostoCosto)}
+        </span>
+      </div>
+
+      {/* Modal de confirmación al recortar el plazo por debajo de datos cargados */}
+      {confirmPlazo !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(20,18,25,0.35)' }}
+        >
+          <div style={{ ...GLASS_CARD, maxWidth: 440 }} className="p-6">
+            <h3 className="text-base font-bold mb-2" style={{ color: '#1A1A2E' }}>
+              Reducir el plazo a {confirmPlazo} {confirmPlazo === 1 ? 'mes' : 'meses'}
+            </h3>
+            <p className="text-sm mb-4" style={{ color: '#6B7080' }}>
+              Hay avance cargado hasta el <span className="font-semibold">mes {topeConDatos}</span>. Los
+              porcentajes de los meses {confirmPlazo + 1} a {topeConDatos} van a quedar{' '}
+              <span className="font-semibold">ocultos</span>. No se borran: siguen guardados y vuelven a
+              aparecer si volvés a ampliar el plazo.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmPlazo(null);
+                  setPlazoTexto(plazoServer > 0 ? String(plazoServer) : '');
+                }}
+                className="px-4 py-2 rounded-full text-sm font-medium transition-colors hover:bg-black/[0.04]"
+                style={{ border: '1.5px solid #1A1A2E', color: '#1A1A2E' }}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const p = confirmPlazo;
+                  setConfirmPlazo(null);
+                  void persistir(p, fecha);
+                }}
+                className="px-4 py-2 rounded-full text-sm font-semibold transition-colors"
+                style={{ background: '#C8E64C', color: '#2A3300' }}
+              >
+                Ocultar y reducir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ─── Celda editable ───────────────────────────────────────────────────────── */
@@ -157,14 +459,158 @@ function Celda({
   );
 }
 
+/* ─── Curva de inversión acumulada (SVG inline, sin dependencias) ───────────── */
+
+function CurvaAcumulada({
+  montoPorMes,
+  etiquetas,
+  total,
+}: {
+  montoPorMes: number[];
+  etiquetas: string[];
+  total: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [ancho, setAncho] = useState(760);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      if (cr && cr.width > 0) setAncho(cr.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Acumulado: cada mes = su plata + la de todos los meses anteriores.
+  const acumulado = useMemo(() => {
+    const out: number[] = [];
+    let s = 0;
+    for (const m of montoPorMes) {
+      s += m;
+      out.push(s);
+    }
+    return out;
+  }, [montoPorMes]);
+
+  const n = acumulado.length;
+  const H = 220;
+  const padL = 14;
+  const padR = 16;
+  const padT = 20;
+  const padB = 30;
+  const plotW = Math.max(ancho - padL - padR, 10);
+  const plotH = H - padT - padB;
+  const ultimo = acumulado[n - 1] ?? 0;
+  const maxY = Math.max(total, ultimo, 1);
+
+  const x = (i: number) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const y = (v: number) => padT + plotH - (v / maxY) * plotH;
+  const baseY = padT + plotH;
+
+  const puntos = acumulado.map((v, i) => ({ cx: x(i), cy: y(v), v, i }));
+  const linea = puntos
+    .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.cx.toFixed(1)} ${p.cy.toFixed(1)}`)
+    .join(' ');
+  const area =
+    n > 0
+      ? `M ${x(0).toFixed(1)} ${baseY.toFixed(1)} ` +
+        puntos.map((p) => `L ${p.cx.toFixed(1)} ${p.cy.toFixed(1)}`).join(' ') +
+        ` L ${x(n - 1).toFixed(1)} ${baseY.toFixed(1)} Z`
+      : '';
+  const yTotal = y(total);
+  // Para no saturar el eje, mostramos como mucho ~12 etiquetas.
+  const pasoEtiqueta = Math.ceil(n / 12) || 1;
+
+  return (
+    <div style={GLASS_CARD} className="p-5">
+      <div className="flex items-baseline justify-between mb-3">
+        <h3 className="text-sm font-semibold" style={{ color: '#1A1A2E' }}>
+          Curva de inversión acumulada
+        </h3>
+        <span className="text-xs" style={{ color: '#6B7080' }}>
+          Costo-costo · acumulado mes a mes
+        </span>
+      </div>
+      <div ref={ref} style={{ width: '100%' }}>
+        <svg width={ancho} height={H} role="img" aria-label="Curva de inversión acumulada por mes">
+          <defs>
+            <linearGradient id="grad-curva" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(200,230,76,0.35)" />
+              <stop offset="100%" stopColor="rgba(200,230,76,0.02)" />
+            </linearGradient>
+          </defs>
+
+          {/* Línea base */}
+          <line x1={padL} y1={baseY} x2={padL + plotW} y2={baseY} stroke="rgba(0,0,0,0.10)" />
+
+          {/* Objetivo: total costo-costo (donde debería terminar la curva) */}
+          {total > 0 && (
+            <>
+              <line
+                x1={padL}
+                y1={yTotal}
+                x2={padL + plotW}
+                y2={yTotal}
+                stroke="rgba(26,26,46,0.18)"
+                strokeDasharray="4 4"
+              />
+              <text x={padL + plotW} y={yTotal - 5} textAnchor="end" fontSize="10" fill="#6B7080">
+                Total {formatPrecio(total)}
+              </text>
+            </>
+          )}
+
+          {area && <path d={area} fill="url(#grad-curva)" />}
+          {linea && (
+            <path
+              d={linea}
+              fill="none"
+              stroke="#2A3300"
+              strokeWidth={2}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          )}
+
+          {puntos.map((p) => (
+            <circle key={p.i} cx={p.cx} cy={p.cy} r={3} fill="#2A3300">
+              <title>{`${etiquetas[p.i]}: ${formatPrecio(p.v)}`}</title>
+            </circle>
+          ))}
+
+          {puntos.map((p) =>
+            p.i % pasoEtiqueta === 0 || p.i === n - 1 ? (
+              <text
+                key={`lbl-${p.i}`}
+                x={p.cx}
+                y={H - 10}
+                textAnchor="middle"
+                fontSize="10"
+                fill="#9CA3AF"
+              >
+                {etiquetas[p.i]}
+              </text>
+            ) : null,
+          )}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Grilla ───────────────────────────────────────────────────────────────── */
 
 function Grilla({
   datos,
   guardarCelda,
+  modo,
 }: {
   datos: PlanificacionResponse;
   guardarCelda: (itemId: string, mes: number, pct: number | null) => Promise<void>;
+  modo: Modo;
 }) {
   const meses = datos.plazo_meses && datos.plazo_meses > 0 ? datos.plazo_meses : 0;
 
@@ -264,6 +710,21 @@ function Grilla({
     return mapa;
   }, [datos]);
 
+  // Incidencia acumulada por rubro = suma de incidencia_pct de sus ítems.
+  const incidenciaRubro = useMemo(() => {
+    const mapa: Record<string, number> = {};
+    for (const rubro of datos.rubros) {
+      mapa[rubro.rubro_id] = rubro.items.reduce((a, it) => a + it.incidencia_pct, 0);
+    }
+    return mapa;
+  }, [datos]);
+
+  // Incidencia total (referencia en el pie; debería dar ~100%).
+  const incidenciaTotal = useMemo(
+    () => datos.rubros.reduce((a, r) => a + (incidenciaRubro[r.rubro_id] ?? 0), 0),
+    [datos, incidenciaRubro],
+  );
+
   // Cálculos en vivo: plata por celda = (pct/100) × subtotal del ítem.
   const calc = useMemo(() => {
     const montoPorMes = new Array<number>(meses).fill(0);
@@ -299,8 +760,8 @@ function Grilla({
           Esta obra todavía no tiene un plazo definido.
         </p>
         <p className="text-sm mt-2" style={{ color: '#6B7080' }}>
-          Configurá el <span className="font-medium">plazo de la obra</span> en{' '}
-          <span className="font-medium">Presupuesto → Gastos Generales</span> para poder planificar por mes.
+          Definí el <span className="font-medium">plazo (meses)</span> en la barra de arriba para empezar a
+          planificar por mes.
         </p>
       </div>
     );
@@ -318,42 +779,27 @@ function Grilla({
   }
 
   const columnas = Array.from({ length: meses }, (_, i) => i + 1);
+  const modoEfectivo: Modo = modo === 'calendario' && datos.fecha_inicio ? 'calendario' : 'relativo';
+  const etiquetas = columnas.map((mes) =>
+    modoEfectivo === 'calendario' ? etiquetaMesCalendario(datos.fecha_inicio, mes) : `Mes ${mes}`,
+  );
 
   return (
-    <div className="overflow-auto" style={{ ...GLASS_CARD, maxHeight: 'calc(100vh - 200px)' }}>
-      <table className="border-collapse" style={{ minWidth: '100%' }}>
-        <thead>
-          <tr>
-            <th
-              className="text-left px-4 py-3"
-              style={{
-                position: 'sticky',
-                top: 0,
-                left: 0,
-                zIndex: 30,
-                width: ANCHO_ITEM,
-                minWidth: ANCHO_ITEM,
-                background: BG_CORNER,
-                backdropFilter: 'blur(8px)',
-                fontSize: '13px',
-                fontWeight: 600,
-                color: '#6B7080',
-                borderBottom: '1px solid rgba(0,0,0,0.08)',
-              }}
-            >
-              Ítem
-            </th>
-            {columnas.map((mes) => (
+    <div className="flex flex-col gap-4">
+      <div className="overflow-auto" style={{ ...GLASS_CARD, maxHeight: 'calc(100vh - 360px)' }}>
+        <table className="border-collapse" style={{ minWidth: '100%' }}>
+          <thead>
+            <tr>
               <th
-                key={mes}
-                className="px-2 py-3 text-center"
+                className="text-left px-4 py-3"
                 style={{
                   position: 'sticky',
                   top: 0,
-                  zIndex: 20,
-                  width: ANCHO_MES,
-                  minWidth: ANCHO_MES,
-                  background: BG_HEADER,
+                  left: 0,
+                  zIndex: 30,
+                  width: ANCHO_ITEM,
+                  minWidth: ANCHO_ITEM,
+                  background: BG_CORNER,
                   backdropFilter: 'blur(8px)',
                   fontSize: '13px',
                   fontWeight: 600,
@@ -361,257 +807,372 @@ function Grilla({
                   borderBottom: '1px solid rgba(0,0,0,0.08)',
                 }}
               >
-                Mes {mes}
+                Ítem
               </th>
-            ))}
-            <th
-              className="px-3 py-3 text-center"
-              style={{
-                position: 'sticky',
-                top: 0,
-                right: 0,
-                zIndex: 30,
-                width: ANCHO_TOTAL,
-                minWidth: ANCHO_TOTAL,
-                background: BG_CORNER,
-                backdropFilter: 'blur(8px)',
-                fontSize: '13px',
-                fontWeight: 600,
-                color: '#6B7080',
-                borderBottom: '1px solid rgba(0,0,0,0.08)',
-                borderLeft: '1px solid rgba(0,0,0,0.06)',
-              }}
-            >
-              Total
-            </th>
-          </tr>
-        </thead>
-
-        <tbody>
-          {datos.rubros.map((rubro) => {
-            const colapsado = colapsados[rubro.rubro_id] ?? false;
-            const montoRubro = calc.rubroMontoPorMes[rubro.rubro_id] ?? [];
-            const totalRubro = montoRubro.reduce((a, b) => a + b, 0);
-
-            return (
-              <Fragment key={rubro.rubro_id}>
-                {/* Cabecera de rubro: toggle + subtotales por mes */}
-                <tr style={{ background: BG_RUBRO }}>
-                  <td
-                    style={{
-                      position: 'sticky',
-                      left: 0,
-                      zIndex: 10,
-                      width: ANCHO_ITEM,
-                      minWidth: ANCHO_ITEM,
-                      background: BG_RUBRO_LEFT,
-                      backdropFilter: 'blur(8px)',
-                      borderBottom: '1px solid rgba(0,0,0,0.06)',
-                    }}
-                  >
-                    <button
-                      onClick={() =>
-                        setColapsados((prev) => ({ ...prev, [rubro.rubro_id]: !colapsado }))
-                      }
-                      className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:opacity-80 transition-opacity"
-                    >
-                      <span
-                        className="inline-block transition-transform"
-                        style={{
-                          color: '#6B7080',
-                          fontSize: '11px',
-                          transform: colapsado ? 'rotate(-90deg)' : 'rotate(0deg)',
-                        }}
-                      >
-                        ▼
-                      </span>
-                      <span className="text-sm font-semibold truncate" style={{ color: '#1A1A2E' }}>
-                        {rubro.rubro_nombre}
-                      </span>
-                    </button>
-                  </td>
-                  {columnas.map((mes) => (
-                    <td
-                      key={mes}
-                      className="px-2 py-2.5 text-right font-mono tabular-nums"
-                      style={{
-                        borderBottom: '1px solid rgba(0,0,0,0.06)',
-                        fontSize: '11px',
-                        color: '#6B7080',
-                      }}
-                    >
-                      {montoRubro[mes - 1] > 0 ? formatPrecio(montoRubro[mes - 1]) : '—'}
-                    </td>
-                  ))}
-                  <td
-                    className="px-3 py-2.5 text-right font-mono tabular-nums"
-                    style={{
-                      position: 'sticky',
-                      right: 0,
-                      zIndex: 10,
-                      width: ANCHO_TOTAL,
-                      minWidth: ANCHO_TOTAL,
-                      background: BG_RUBRO_LEFT,
-                      backdropFilter: 'blur(8px)',
-                      borderBottom: '1px solid rgba(0,0,0,0.06)',
-                      borderLeft: '1px solid rgba(0,0,0,0.06)',
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      color: '#1A1A2E',
-                    }}
-                  >
-                    {formatPrecio(totalRubro)}
-                  </td>
-                </tr>
-
-                {/* Ítems del rubro (ocultos si está colapsado) */}
-                {!colapsado &&
-                  rubro.items.map((item) => {
-                    const totalPct = calc.totalFilaPct[item.item_id] ?? 0;
-                    return (
-                      <tr key={item.item_id} className="hover:bg-black/[0.015] transition-colors">
-                        <td
-                          style={{
-                            position: 'sticky',
-                            left: 0,
-                            zIndex: 10,
-                            width: ANCHO_ITEM,
-                            minWidth: ANCHO_ITEM,
-                            background: BG_STICKY_LEFT,
-                            backdropFilter: 'blur(8px)',
-                            borderBottom: '1px solid rgba(0,0,0,0.04)',
-                          }}
-                          className="px-4 py-2 pl-9"
-                        >
-                          <div className="text-sm truncate" style={{ color: '#1A1A2E' }}>
-                            {item.descripcion}
-                          </div>
-                          <div className="text-xs" style={{ color: '#9CA3AF' }}>
-                            {formatNum(item.cantidad_total)} {item.unidad_medida} ·{' '}
-                            {formatPrecio(item.subtotal_costo_costo)}
-                          </div>
-                        </td>
-                        {columnas.map((mes) => {
-                          const k = claveCelda(item.item_id, mes);
-                          return (
-                            <td
-                              key={mes}
-                              className="px-1 py-1"
-                              style={{ borderBottom: '1px solid rgba(0,0,0,0.04)' }}
-                            >
-                              <Celda
-                                valor={valores[k] ?? ''}
-                                estado={estados[k]}
-                                onChange={(v) => setValor(k, v)}
-                                onCommit={() => commit(item.item_id, mes)}
-                                onFocus={() => {
-                                  focoRef.current = k;
-                                }}
-                                onBlur={() => {
-                                  if (focoRef.current === k) focoRef.current = null;
-                                }}
-                              />
-                            </td>
-                          );
-                        })}
-                        <td
-                          className="px-3 py-2 text-right font-mono tabular-nums"
-                          style={{
-                            position: 'sticky',
-                            right: 0,
-                            zIndex: 10,
-                            width: ANCHO_TOTAL,
-                            minWidth: ANCHO_TOTAL,
-                            background: BG_STICKY_LEFT,
-                            backdropFilter: 'blur(8px)',
-                            borderBottom: '1px solid rgba(0,0,0,0.04)',
-                            borderLeft: '1px solid rgba(0,0,0,0.06)',
-                            fontSize: '13px',
-                            fontWeight: 600,
-                            color: colorTotalFila(totalPct),
-                          }}
-                          title={
-                            Math.abs(totalPct - 100) < 0.005
-                              ? 'Ítem completo (100%)'
-                              : totalPct > 100
-                              ? 'Se pasó del 100%'
-                              : 'Todavía no llega al 100%'
-                          }
-                        >
-                          {formatNum(totalPct)}%
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </Fragment>
-            );
-          })}
-        </tbody>
-
-        {/* Fila de totales por mes: lo más importante de la pantalla */}
-        <tfoot>
-          <tr>
-            <td
-              className="px-4 py-3"
-              style={{
-                position: 'sticky',
-                left: 0,
-                bottom: 0,
-                zIndex: 30,
-                width: ANCHO_ITEM,
-                minWidth: ANCHO_ITEM,
-                background: BG_FOOTER,
-                backdropFilter: 'blur(8px)',
-                borderTop: '2px solid rgba(0,0,0,0.10)',
-                fontSize: '13px',
-                fontWeight: 700,
-                color: '#1A1A2E',
-              }}
-            >
-              Plata por mes
-            </td>
-            {columnas.map((mes) => (
-              <td
-                key={mes}
-                className="px-2 py-3 text-right font-mono tabular-nums"
+              {/* Incidencia: columna angosta, fija junto a la de ítems */}
+              <th
+                className="px-2 py-3 text-right"
                 style={{
                   position: 'sticky',
+                  top: 0,
+                  left: LEFT_INCID,
+                  zIndex: 30,
+                  width: ANCHO_INCID,
+                  minWidth: ANCHO_INCID,
+                  background: BG_CORNER,
+                  backdropFilter: 'blur(8px)',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  color: '#6B7080',
+                  borderBottom: '1px solid rgba(0,0,0,0.08)',
+                  borderRight: '1px solid rgba(0,0,0,0.06)',
+                }}
+                title="Incidencia sobre el total costo-costo"
+              >
+                Incid.
+              </th>
+              {columnas.map((mes) => (
+                <th
+                  key={mes}
+                  className="px-2 py-3 text-center"
+                  style={{
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: 20,
+                    width: ANCHO_MES,
+                    minWidth: ANCHO_MES,
+                    background: BG_HEADER,
+                    backdropFilter: 'blur(8px)',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    color: '#6B7080',
+                    borderBottom: '1px solid rgba(0,0,0,0.08)',
+                  }}
+                >
+                  <div>{etiquetas[mes - 1]}</div>
+                  {modoEfectivo === 'calendario' && (
+                    <div style={{ fontSize: '10px', fontWeight: 500, color: '#9CA3AF' }}>Mes {mes}</div>
+                  )}
+                </th>
+              ))}
+              <th
+                className="px-3 py-3 text-center"
+                style={{
+                  position: 'sticky',
+                  top: 0,
+                  right: 0,
+                  zIndex: 30,
+                  width: ANCHO_TOTAL,
+                  minWidth: ANCHO_TOTAL,
+                  background: BG_CORNER,
+                  backdropFilter: 'blur(8px)',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  color: '#6B7080',
+                  borderBottom: '1px solid rgba(0,0,0,0.08)',
+                  borderLeft: '1px solid rgba(0,0,0,0.06)',
+                }}
+              >
+                Total
+              </th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {datos.rubros.map((rubro) => {
+              const colapsado = colapsados[rubro.rubro_id] ?? false;
+              const montoRubro = calc.rubroMontoPorMes[rubro.rubro_id] ?? [];
+              const totalRubro = montoRubro.reduce((a, b) => a + b, 0);
+              const incidRubro = incidenciaRubro[rubro.rubro_id] ?? 0;
+
+              return (
+                <Fragment key={rubro.rubro_id}>
+                  {/* Cabecera de rubro: toggle + incidencia acumulada + subtotales por mes */}
+                  <tr style={{ background: BG_RUBRO }}>
+                    <td
+                      style={{
+                        position: 'sticky',
+                        left: 0,
+                        zIndex: 10,
+                        width: ANCHO_ITEM,
+                        minWidth: ANCHO_ITEM,
+                        background: BG_RUBRO_LEFT,
+                        backdropFilter: 'blur(8px)',
+                        borderBottom: '1px solid rgba(0,0,0,0.06)',
+                      }}
+                    >
+                      <button
+                        onClick={() =>
+                          setColapsados((prev) => ({ ...prev, [rubro.rubro_id]: !colapsado }))
+                        }
+                        className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:opacity-80 transition-opacity"
+                      >
+                        <span
+                          className="inline-block transition-transform"
+                          style={{
+                            color: '#6B7080',
+                            fontSize: '11px',
+                            transform: colapsado ? 'rotate(-90deg)' : 'rotate(0deg)',
+                          }}
+                        >
+                          ▼
+                        </span>
+                        <span className="text-sm font-semibold truncate" style={{ color: '#1A1A2E' }}>
+                          {rubro.rubro_nombre}
+                        </span>
+                      </button>
+                    </td>
+                    <td
+                      className="px-2 py-2.5 text-right font-mono tabular-nums"
+                      style={{
+                        position: 'sticky',
+                        left: LEFT_INCID,
+                        zIndex: 10,
+                        width: ANCHO_INCID,
+                        minWidth: ANCHO_INCID,
+                        background: BG_RUBRO_LEFT,
+                        backdropFilter: 'blur(8px)',
+                        borderBottom: '1px solid rgba(0,0,0,0.06)',
+                        borderRight: '1px solid rgba(0,0,0,0.06)',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        color: '#1A1A2E',
+                      }}
+                      title="Incidencia acumulada del rubro"
+                    >
+                      {formatPct1(incidRubro)}
+                    </td>
+                    {columnas.map((mes) => (
+                      <td
+                        key={mes}
+                        className="px-2 py-2.5 text-right font-mono tabular-nums"
+                        style={{
+                          borderBottom: '1px solid rgba(0,0,0,0.06)',
+                          fontSize: '11px',
+                          color: '#6B7080',
+                        }}
+                      >
+                        {montoRubro[mes - 1] > 0 ? formatPrecio(montoRubro[mes - 1]) : '—'}
+                      </td>
+                    ))}
+                    <td
+                      className="px-3 py-2.5 text-right font-mono tabular-nums"
+                      style={{
+                        position: 'sticky',
+                        right: 0,
+                        zIndex: 10,
+                        width: ANCHO_TOTAL,
+                        minWidth: ANCHO_TOTAL,
+                        background: BG_RUBRO_LEFT,
+                        backdropFilter: 'blur(8px)',
+                        borderBottom: '1px solid rgba(0,0,0,0.06)',
+                        borderLeft: '1px solid rgba(0,0,0,0.06)',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        color: '#1A1A2E',
+                      }}
+                    >
+                      {formatPrecio(totalRubro)}
+                    </td>
+                  </tr>
+
+                  {/* Ítems del rubro (ocultos si está colapsado) */}
+                  {!colapsado &&
+                    rubro.items.map((item) => {
+                      const totalPct = calc.totalFilaPct[item.item_id] ?? 0;
+                      return (
+                        <tr key={item.item_id} className="hover:bg-black/[0.015] transition-colors">
+                          <td
+                            style={{
+                              position: 'sticky',
+                              left: 0,
+                              zIndex: 10,
+                              width: ANCHO_ITEM,
+                              minWidth: ANCHO_ITEM,
+                              background: BG_STICKY_LEFT,
+                              backdropFilter: 'blur(8px)',
+                              borderBottom: '1px solid rgba(0,0,0,0.04)',
+                            }}
+                            className="px-4 py-2 pl-9"
+                          >
+                            <div className="text-sm truncate" style={{ color: '#1A1A2E' }}>
+                              {item.descripcion}
+                            </div>
+                            <div className="text-xs" style={{ color: '#9CA3AF' }}>
+                              {formatNum(item.cantidad_total)} {item.unidad_medida} ·{' '}
+                              {formatPrecio(item.subtotal_costo_costo)}
+                            </div>
+                          </td>
+                          {/* Incidencia del ítem (informativa, no editable) */}
+                          <td
+                            className="px-2 py-2 text-right font-mono tabular-nums"
+                            style={{
+                              position: 'sticky',
+                              left: LEFT_INCID,
+                              zIndex: 10,
+                              width: ANCHO_INCID,
+                              minWidth: ANCHO_INCID,
+                              background: BG_STICKY_LEFT,
+                              backdropFilter: 'blur(8px)',
+                              borderBottom: '1px solid rgba(0,0,0,0.04)',
+                              borderRight: '1px solid rgba(0,0,0,0.06)',
+                              fontSize: '12px',
+                              color: '#6B7080',
+                            }}
+                            title="Incidencia de este ítem sobre el total costo-costo"
+                          >
+                            {formatPct1(item.incidencia_pct)}
+                          </td>
+                          {columnas.map((mes) => {
+                            const k = claveCelda(item.item_id, mes);
+                            return (
+                              <td
+                                key={mes}
+                                className="px-1 py-1"
+                                style={{ borderBottom: '1px solid rgba(0,0,0,0.04)' }}
+                              >
+                                <Celda
+                                  valor={valores[k] ?? ''}
+                                  estado={estados[k]}
+                                  onChange={(v) => setValor(k, v)}
+                                  onCommit={() => commit(item.item_id, mes)}
+                                  onFocus={() => {
+                                    focoRef.current = k;
+                                  }}
+                                  onBlur={() => {
+                                    if (focoRef.current === k) focoRef.current = null;
+                                  }}
+                                />
+                              </td>
+                            );
+                          })}
+                          <td
+                            className="px-3 py-2 text-right font-mono tabular-nums"
+                            style={{
+                              position: 'sticky',
+                              right: 0,
+                              zIndex: 10,
+                              width: ANCHO_TOTAL,
+                              minWidth: ANCHO_TOTAL,
+                              background: BG_STICKY_LEFT,
+                              backdropFilter: 'blur(8px)',
+                              borderBottom: '1px solid rgba(0,0,0,0.04)',
+                              borderLeft: '1px solid rgba(0,0,0,0.06)',
+                              fontSize: '13px',
+                              fontWeight: 600,
+                              color: colorTotalFila(totalPct),
+                            }}
+                            title={
+                              Math.abs(totalPct - 100) < 0.005
+                                ? 'Ítem completo (100%)'
+                                : totalPct > 100
+                                ? 'Se pasó del 100%'
+                                : 'Todavía no llega al 100%'
+                            }
+                          >
+                            {formatNum(totalPct)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </Fragment>
+              );
+            })}
+          </tbody>
+
+          {/* Fila de totales por mes: lo más importante de la pantalla */}
+          <tfoot>
+            <tr>
+              <td
+                className="px-4 py-3"
+                style={{
+                  position: 'sticky',
+                  left: 0,
                   bottom: 0,
-                  zIndex: 20,
+                  zIndex: 30,
+                  width: ANCHO_ITEM,
+                  minWidth: ANCHO_ITEM,
                   background: BG_FOOTER,
                   backdropFilter: 'blur(8px)',
                   borderTop: '2px solid rgba(0,0,0,0.10)',
-                  fontSize: '12px',
-                  fontWeight: 600,
+                  fontSize: '13px',
+                  fontWeight: 700,
                   color: '#1A1A2E',
                 }}
               >
-                {formatPrecio(calc.montoPorMes[mes - 1])}
+                Plata por mes
               </td>
-            ))}
-            <td
-              className="px-3 py-3 text-right font-mono tabular-nums"
-              style={{
-                position: 'sticky',
-                right: 0,
-                bottom: 0,
-                zIndex: 30,
-                width: ANCHO_TOTAL,
-                minWidth: ANCHO_TOTAL,
-                background: BG_FOOTER,
-                backdropFilter: 'blur(8px)',
-                borderTop: '2px solid rgba(0,0,0,0.10)',
-                borderLeft: '1px solid rgba(0,0,0,0.06)',
-                fontSize: '12px',
-                fontWeight: 700,
-                color: '#1A1A2E',
-              }}
-            >
-              {formatPrecio(calc.granTotal)}
-            </td>
-          </tr>
-        </tfoot>
-      </table>
+              <td
+                className="px-2 py-3 text-right font-mono tabular-nums"
+                style={{
+                  position: 'sticky',
+                  left: LEFT_INCID,
+                  bottom: 0,
+                  zIndex: 30,
+                  width: ANCHO_INCID,
+                  minWidth: ANCHO_INCID,
+                  background: BG_FOOTER,
+                  backdropFilter: 'blur(8px)',
+                  borderTop: '2px solid rgba(0,0,0,0.10)',
+                  borderRight: '1px solid rgba(0,0,0,0.06)',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  color: '#1A1A2E',
+                }}
+                title="Incidencia total (debería dar ~100%)"
+              >
+                {formatPct1(incidenciaTotal)}
+              </td>
+              {columnas.map((mes) => (
+                <td
+                  key={mes}
+                  className="px-2 py-3 text-right font-mono tabular-nums"
+                  style={{
+                    position: 'sticky',
+                    bottom: 0,
+                    zIndex: 20,
+                    background: BG_FOOTER,
+                    backdropFilter: 'blur(8px)',
+                    borderTop: '2px solid rgba(0,0,0,0.10)',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    color: '#1A1A2E',
+                  }}
+                >
+                  {formatPrecio(calc.montoPorMes[mes - 1])}
+                </td>
+              ))}
+              <td
+                className="px-3 py-3 text-right font-mono tabular-nums"
+                style={{
+                  position: 'sticky',
+                  right: 0,
+                  bottom: 0,
+                  zIndex: 30,
+                  width: ANCHO_TOTAL,
+                  minWidth: ANCHO_TOTAL,
+                  background: BG_FOOTER,
+                  backdropFilter: 'blur(8px)',
+                  borderTop: '2px solid rgba(0,0,0,0.10)',
+                  borderLeft: '1px solid rgba(0,0,0,0.06)',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  color: '#1A1A2E',
+                }}
+              >
+                {formatPrecio(calc.granTotal)}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+      {/* Curva de inversión acumulada, en vivo desde la plata por mes */}
+      <CurvaAcumulada
+        montoPorMes={calc.montoPorMes}
+        etiquetas={etiquetas}
+        total={datos.total_costo_costo}
+      />
     </div>
   );
 }
@@ -621,9 +1182,13 @@ function Grilla({
 export default function PlanificacionPage() {
   const params = useParams();
   const obraId = params.id as string;
-  const { datos, cargando, error, guardarCelda } = usePlanificacion(obraId);
+  const { datos, cargando, error, guardarCelda, guardarConfiguracion } = usePlanificacion(obraId);
+
+  const [modo, setModo] = useState<Modo>('relativo');
+  const [configError, setConfigError] = useState<string | null>(null);
 
   const obraNombre = datos?.obra_nombre ?? '…';
+  const topeConDatos = useMemo(() => (datos ? maxMesConDatos(datos) : 0), [datos]);
 
   return (
     <div
@@ -670,7 +1235,7 @@ export default function PlanificacionPage() {
       </header>
 
       {/* ── Contenido ── */}
-      <div className="flex-1 overflow-hidden p-6 flex flex-col gap-4">
+      <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4">
         {cargando && (
           <div className="flex items-center justify-center h-64">
             <p style={{ color: '#7A6A5A' }}>Cargando planificación…</p>
@@ -693,41 +1258,38 @@ export default function PlanificacionPage() {
 
         {datos && !error && (
           <>
-            {/* Barra de contexto */}
-            <div className="flex flex-wrap items-center gap-x-8 gap-y-2 px-5 py-3" style={GLASS_CARD}>
-              <div>
-                <span className="text-xs uppercase tracking-wide" style={{ color: '#6B7080' }}>
-                  Total costo-costo
-                </span>
-                <p className="text-base font-bold font-mono tabular-nums" style={{ color: '#1A1A2E' }}>
-                  {formatPrecio(datos.total_costo_costo)}
-                </p>
-              </div>
-              <div>
-                <span className="text-xs uppercase tracking-wide" style={{ color: '#6B7080' }}>
-                  Plazo
-                </span>
-                <p className="text-base font-semibold" style={{ color: '#1A1A2E' }}>
-                  {datos.plazo_meses ? `${datos.plazo_meses} meses` : 'No configurado'}
-                </p>
-              </div>
-              <div>
-                <span className="text-xs uppercase tracking-wide" style={{ color: '#6B7080' }}>
-                  Inicio
-                </span>
-                <p className="text-base font-semibold" style={{ color: '#1A1A2E' }}>
-                  {datos.fecha_inicio || 'No disponible'}
-                </p>
-              </div>
-              <p className="text-xs flex-1 min-w-[220px]" style={{ color: '#9CA3AF' }}>
-                Cargá el % de avance físico de cada ítem por mes. Se guarda solo al salir de la celda. La suma
-                por fila debería llegar a 100%.
-              </p>
-            </div>
+            {/* Barra de configuración: fecha de inicio + plazo + modo de encabezado */}
+            <ConfigBar
+              fechaInicioServer={datos.fecha_inicio || ''}
+              plazoServer={datos.plazo_meses ?? 0}
+              topeConDatos={topeConDatos}
+              modo={modo}
+              setModo={setModo}
+              totalCostoCosto={datos.total_costo_costo}
+              guardarConfiguracion={guardarConfiguracion}
+              onError={setConfigError}
+            />
 
-            <div className="flex-1 min-h-0">
-              <Grilla datos={datos} guardarCelda={guardarCelda} />
-            </div>
+            {configError && (
+              <div
+                className="p-3 rounded-2xl"
+                style={{
+                  background: 'rgba(239, 68, 68, 0.12)',
+                  border: '1px solid rgba(239, 68, 68, 0.30)',
+                }}
+              >
+                <p style={{ color: '#DC2626' }} className="text-sm font-medium">
+                  {configError}
+                </p>
+              </div>
+            )}
+
+            <p className="text-xs px-1" style={{ color: '#9CA3AF' }}>
+              Cargá el % de avance físico de cada ítem por mes. Se guarda solo al salir de la celda. La suma
+              por fila debería llegar a 100%.
+            </p>
+
+            <Grilla datos={datos} guardarCelda={guardarCelda} modo={modo} />
           </>
         )}
       </div>
