@@ -241,3 +241,26 @@ export interface PlanificacionResponse {
   total_costo_costo: number;
   rubros: PlanificacionRubro[];
 }
+
+/* ─── Explosión de insumos: respuesta de /api/explosion-insumos/[obraId] ────── */
+
+export interface ExplosionInsumo {
+  insumo_id: string;
+  nombre: string;
+  unidad_medida: string;
+  tipo: Insumo["tipo"];
+  precio_unitario: number;
+  // Consumo del insumo por mes. Longitud = plazo_meses; índice 0 = mes 1.
+  // Un mes sin consumo es 0 (nunca se omite), para poder dibujar la grilla completa.
+  consumo_por_mes: number[];
+  // Suma de consumo_por_mes: consumo del insumo en toda la obra.
+  total: number;
+}
+
+export interface ExplosionInsumosResponse {
+  obra_id: string;
+  obra_nombre: string;
+  plazo_meses: number | null;
+  fecha_inicio: string;
+  insumos: ExplosionInsumo[];
+}

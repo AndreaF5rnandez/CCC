@@ -27,6 +27,22 @@ export function calcularPrecioReceta(
 }
 
 /**
+ * Cantidad total de un ítem = suma de `cantidad_calculada` de todas sus mediciones.
+ *
+ * Es la misma cantidad física que usan el cómputo, el presupuesto y el endpoint
+ * de planificación (tarea 2) y la explosión de insumos. Fuente única: no
+ * reimplementar esta suma en cada endpoint.
+ *
+ * @param mediciones Mediciones del ítem (solo se lee `cantidad_calculada`).
+ * @returns La suma de las cantidades calculadas de todas las mediciones.
+ */
+export function calcularCantidadTotalItem(
+  mediciones: { cantidad_calculada: number }[],
+): number {
+  return mediciones.reduce((suma, m) => suma + Number(m.cantidad_calculada), 0);
+}
+
+/**
  * Calcula la cantidad de una medicion: número de partes × largo × ancho × alto.
  *
  * Replica EXACTAMENTE la columna generada `cantidad_calculada` de PostgreSQL:

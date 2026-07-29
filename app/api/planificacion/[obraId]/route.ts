@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
-import { calcularPrecioReceta } from "@/lib/calculos";
+import { calcularPrecioReceta, calcularCantidadTotalItem } from "@/lib/calculos";
 import { loguearError } from "@/lib/apiError";
 import type {
   Rubro,
@@ -83,10 +83,7 @@ export async function GET(
       for (const item of itemsOrdenados) {
         if (!item.receta) continue;
 
-        const cantidad_total = item.mediciones.reduce(
-          (suma, m) => suma + Number(m.cantidad_calculada),
-          0,
-        );
+        const cantidad_total = calcularCantidadTotalItem(item.mediciones);
         const precio_unitario = calcularPrecioReceta(item.receta.ingredientes);
         const subtotal_costo_costo = cantidad_total * precio_unitario;
         totalCostoCosto += subtotal_costo_costo;
