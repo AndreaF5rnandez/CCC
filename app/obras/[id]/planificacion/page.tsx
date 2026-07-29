@@ -4,7 +4,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { usePlanificacion } from '@/hooks/usePlanificacion';
-import type { PlanificacionResponse } from '@/types';
+import { useExplosionInsumos } from '@/hooks/useExplosionInsumos';
+import type { PlanificacionResponse, ExplosionInsumo } from '@/types';
 
 /* ─── Estilo base (skill de diseño) ────────────────────────────────────────── */
 
@@ -39,6 +40,10 @@ const ANCHO_INCID = 82; // columna angosta de incidencia, fija junto a la de ít
 const ANCHO_MES = 92;
 const ANCHO_TOTAL = 104;
 
+// Explosión de insumos: columna de nombre (izq) y columna de total+plata (der).
+const ANCHO_INSUMO = 240;
+const ANCHO_TOTAL_PLATA = 150;
+
 // left de la columna de incidencia = justo después de la de ítems (deben coincidir
 // con el ancho renderizado de la columna de ítems para que queden pegadas al fijar).
 const LEFT_INCID = ANCHO_ITEM;
@@ -58,6 +63,19 @@ function formatPct1(v: number) {
   return (
     new Intl.NumberFormat('es-AR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(v) + '%'
   );
+}
+
+/* Insumos que se cuentan por unidad entera (ej: ladrillos, unidad "u"): se
+ * muestran redondeados a entero. El resto, hasta 2 decimales. */
+function esUnidadEntera(unidad: string): boolean {
+  return unidad.trim().toLowerCase() === 'u';
+}
+
+function formatCantidad(v: number, unidad: string): string {
+  if (esUnidadEntera(unidad)) {
+    return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(Math.round(v));
+  }
+  return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 2 }).format(v);
 }
 
 type Estado = 'guardando' | 'guardado' | 'error';
@@ -125,6 +143,53 @@ function maxMesConDatos(datos: PlanificacionResponse): number {
     }
   }
   return max;
+}
+
+/* ─── Toggle de modo de encabezado (Relativo / Calendario) ─────────────────── */
+/* Reutilizado por el Cronograma (dentro de ConfigBar) y por la Explosión de
+ * insumos, para no duplicar la lógica de encabezados. */
+
+function ToggleModo({
+  modo,
+  setModo,
+  hayFecha,
+}: {
+  modo: Modo;
+  setModo: (m: Modo) => void;
+  hayFecha: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: '#9CA3AF' }}>
+        Encabezados
+      </span>
+      <div
+        className="flex rounded-[10px] p-0.5"
+        style={{ border: '1px solid rgba(0,0,0,0.12)', background: 'rgba(255,255,255,0.5)' }}
+      >
+        {(['relativo', 'calendario'] as const).map((m) => {
+          const activo = modo === m;
+          const deshabilitado = m === 'calendario' && !hayFecha;
+          return (
+            <button
+              key={m}
+              type="button"
+              disabled={deshabilitado}
+              onClick={() => setModo(m)}
+              title={deshabilitado ? 'Cargá una fecha de inicio para usar el modo calendario' : undefined}
+              className="text-xs font-semibold px-3 py-1.5 rounded-[8px] transition-colors disabled:cursor-not-allowed"
+              style={{
+                background: activo ? '#C8E64C' : 'transparent',
+                color: deshabilitado ? '#C4C4CC' : activo ? '#2A3300' : '#6B7080',
+              }}
+            >
+              {m === 'relativo' ? 'Relativo' : 'Calendario'}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 /* ─── Barra de configuración (fecha de inicio + plazo + modo de encabezado) ──── */
@@ -288,39 +353,8 @@ function ConfigBar({
         </div>
       </div>
 
-      {/* Modo de encabezado */}
-      <div className="flex flex-col gap-1">
-        <span className={labelCls} style={{ color: '#9CA3AF' }}>
-          Encabezados
-        </span>
-        <div
-          className="flex rounded-[10px] p-0.5"
-          style={{ border: '1px solid rgba(0,0,0,0.12)', background: 'rgba(255,255,255,0.5)' }}
-        >
-          {(['relativo', 'calendario'] as const).map((m) => {
-            const activo = modo === m;
-            const deshabilitado = m === 'calendario' && !fecha;
-            return (
-              <button
-                key={m}
-                type="button"
-                disabled={deshabilitado}
-                onClick={() => setModo(m)}
-                title={
-                  deshabilitado ? 'Cargá una fecha de inicio para usar el modo calendario' : undefined
-                }
-                className="text-xs font-semibold px-3 py-1.5 rounded-[8px] transition-colors disabled:cursor-not-allowed"
-                style={{
-                  background: activo ? '#C8E64C' : 'transparent',
-                  color: deshabilitado ? '#C4C4CC' : activo ? '#2A3300' : '#6B7080',
-                }}
-              >
-                {m === 'relativo' ? 'Relativo' : 'Calendario'}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      {/* Modo de encabezado (compartido con la vista de explosión) */}
+      <ToggleModo modo={modo} setModo={setModo} hayFecha={!!fecha} />
 
       <div className="flex-1" />
 
@@ -1177,6 +1211,354 @@ function Grilla({
   );
 }
 
+/* ─── Explosión de insumos (solo lectura) ──────────────────────────────────── */
+
+type TipoInsumo = ExplosionInsumo['tipo'];
+
+const TIPO_TABS: { id: TipoInsumo; label: string }[] = [
+  { id: 'material', label: 'Materiales' },
+  { id: 'mano_de_obra', label: 'Mano de obra' },
+  { id: 'equipo', label: 'Equipo' },
+];
+
+// Texto para el mensaje de "sin insumos" de cada tipo.
+const NOMBRE_TIPO: Record<TipoInsumo, string> = {
+  material: 'materiales',
+  mano_de_obra: 'mano de obra',
+  equipo: 'equipo',
+};
+
+/* Tabla de un tipo de insumo: filas = insumos, columnas = meses. Solo lectura.
+ * Columna de insumo fija a la izquierda, columna de total fija a la derecha,
+ * encabezado de meses fijo arriba y fila de plata por mes fija abajo. */
+function TablaExplosion({
+  insumos,
+  meses,
+  etiquetas,
+  modoEfectivo,
+}: {
+  insumos: ExplosionInsumo[];
+  meses: number;
+  etiquetas: string[];
+  modoEfectivo: Modo;
+}) {
+  const columnas = Array.from({ length: meses }, (_, i) => i + 1);
+
+  // Plata por mes = suma sobre insumos de (cantidad del mes × precio). Gran total.
+  const { plataPorMes, granTotalPlata } = useMemo(() => {
+    const plataPorMes = new Array<number>(meses).fill(0);
+    let granTotalPlata = 0;
+    for (const ins of insumos) {
+      for (let m = 0; m < meses; m++) {
+        const plata = (ins.consumo_por_mes[m] ?? 0) * ins.precio_unitario;
+        plataPorMes[m] += plata;
+        granTotalPlata += plata;
+      }
+    }
+    return { plataPorMes, granTotalPlata };
+  }, [insumos, meses]);
+
+  return (
+    <div className="overflow-auto" style={{ ...GLASS_CARD, maxHeight: 'calc(100vh - 330px)' }}>
+      <table className="border-collapse" style={{ minWidth: '100%' }}>
+        <thead>
+          <tr>
+            <th
+              className="text-left px-4 py-3"
+              style={{
+                position: 'sticky',
+                top: 0,
+                left: 0,
+                zIndex: 30,
+                width: ANCHO_INSUMO,
+                minWidth: ANCHO_INSUMO,
+                background: BG_CORNER,
+                backdropFilter: 'blur(8px)',
+                fontSize: '13px',
+                fontWeight: 600,
+                color: '#6B7080',
+                borderBottom: '1px solid rgba(0,0,0,0.08)',
+              }}
+            >
+              Insumo
+            </th>
+            {columnas.map((mes) => (
+              <th
+                key={mes}
+                className="px-2 py-3 text-center"
+                style={{
+                  position: 'sticky',
+                  top: 0,
+                  zIndex: 20,
+                  width: ANCHO_MES,
+                  minWidth: ANCHO_MES,
+                  background: BG_HEADER,
+                  backdropFilter: 'blur(8px)',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  color: '#6B7080',
+                  borderBottom: '1px solid rgba(0,0,0,0.08)',
+                }}
+              >
+                <div>{etiquetas[mes - 1]}</div>
+                {modoEfectivo === 'calendario' && (
+                  <div style={{ fontSize: '10px', fontWeight: 500, color: '#9CA3AF' }}>Mes {mes}</div>
+                )}
+              </th>
+            ))}
+            <th
+              className="px-3 py-3 text-right"
+              style={{
+                position: 'sticky',
+                top: 0,
+                right: 0,
+                zIndex: 30,
+                width: ANCHO_TOTAL_PLATA,
+                minWidth: ANCHO_TOTAL_PLATA,
+                background: BG_CORNER,
+                backdropFilter: 'blur(8px)',
+                fontSize: '13px',
+                fontWeight: 600,
+                color: '#6B7080',
+                borderBottom: '1px solid rgba(0,0,0,0.08)',
+                borderLeft: '1px solid rgba(0,0,0,0.06)',
+              }}
+            >
+              Total obra
+            </th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {insumos.map((ins) => {
+            const plataTotal = ins.total * ins.precio_unitario;
+            return (
+              <tr key={ins.insumo_id} className="hover:bg-black/[0.015] transition-colors">
+                <td
+                  className="px-4 py-2"
+                  style={{
+                    position: 'sticky',
+                    left: 0,
+                    zIndex: 10,
+                    width: ANCHO_INSUMO,
+                    minWidth: ANCHO_INSUMO,
+                    background: BG_STICKY_LEFT,
+                    backdropFilter: 'blur(8px)',
+                    borderBottom: '1px solid rgba(0,0,0,0.04)',
+                  }}
+                >
+                  <div className="text-sm truncate" style={{ color: '#1A1A2E' }}>
+                    {ins.nombre}
+                  </div>
+                  <div className="text-xs" style={{ color: '#9CA3AF' }}>
+                    {ins.unidad_medida} · {formatPrecio(ins.precio_unitario)}/{ins.unidad_medida}
+                  </div>
+                </td>
+                {columnas.map((mes) => {
+                  const q = ins.consumo_por_mes[mes - 1] ?? 0;
+                  return (
+                    <td
+                      key={mes}
+                      className="px-2 py-2 text-right font-mono tabular-nums"
+                      style={{
+                        borderBottom: '1px solid rgba(0,0,0,0.04)',
+                        fontSize: '13px',
+                        color: q > 0 ? '#1A1A2E' : '#C4C4CC',
+                      }}
+                    >
+                      {q > 0 ? formatCantidad(q, ins.unidad_medida) : '—'}
+                    </td>
+                  );
+                })}
+                <td
+                  className="px-3 py-2 text-right"
+                  style={{
+                    position: 'sticky',
+                    right: 0,
+                    zIndex: 10,
+                    width: ANCHO_TOTAL_PLATA,
+                    minWidth: ANCHO_TOTAL_PLATA,
+                    background: BG_STICKY_LEFT,
+                    backdropFilter: 'blur(8px)',
+                    borderBottom: '1px solid rgba(0,0,0,0.04)',
+                    borderLeft: '1px solid rgba(0,0,0,0.06)',
+                  }}
+                >
+                  <div className="font-mono tabular-nums" style={{ fontSize: '13px', fontWeight: 600, color: '#1A1A2E' }}>
+                    {formatCantidad(ins.total, ins.unidad_medida)} {ins.unidad_medida}
+                  </div>
+                  <div className="font-mono tabular-nums" style={{ fontSize: '11px', color: '#6B7080' }}>
+                    {formatPrecio(plataTotal)}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+
+        {/* Fila de plata por mes: cuánta plata de este tipo de insumo se necesita cada mes */}
+        <tfoot>
+          <tr>
+            <td
+              className="px-4 py-3"
+              style={{
+                position: 'sticky',
+                left: 0,
+                bottom: 0,
+                zIndex: 30,
+                width: ANCHO_INSUMO,
+                minWidth: ANCHO_INSUMO,
+                background: BG_FOOTER,
+                backdropFilter: 'blur(8px)',
+                borderTop: '2px solid rgba(0,0,0,0.10)',
+                fontSize: '13px',
+                fontWeight: 700,
+                color: '#1A1A2E',
+              }}
+            >
+              Plata por mes
+            </td>
+            {columnas.map((mes) => (
+              <td
+                key={mes}
+                className="px-2 py-3 text-right font-mono tabular-nums"
+                style={{
+                  position: 'sticky',
+                  bottom: 0,
+                  zIndex: 20,
+                  background: BG_FOOTER,
+                  backdropFilter: 'blur(8px)',
+                  borderTop: '2px solid rgba(0,0,0,0.10)',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  color: '#1A1A2E',
+                }}
+              >
+                {formatPrecio(plataPorMes[mes - 1])}
+              </td>
+            ))}
+            <td
+              className="px-3 py-3 text-right font-mono tabular-nums"
+              style={{
+                position: 'sticky',
+                right: 0,
+                bottom: 0,
+                zIndex: 30,
+                width: ANCHO_TOTAL_PLATA,
+                minWidth: ANCHO_TOTAL_PLATA,
+                background: BG_FOOTER,
+                backdropFilter: 'blur(8px)',
+                borderTop: '2px solid rgba(0,0,0,0.10)',
+                borderLeft: '1px solid rgba(0,0,0,0.06)',
+                fontSize: '12px',
+                fontWeight: 700,
+                color: '#1A1A2E',
+              }}
+            >
+              {formatPrecio(granTotalPlata)}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
+}
+
+function ExplosionInsumos({
+  obraId,
+  modo,
+  setModo,
+}: {
+  obraId: string;
+  modo: Modo;
+  setModo: (m: Modo) => void;
+}) {
+  const { datos, cargando, error } = useExplosionInsumos(obraId);
+  const [tipo, setTipo] = useState<TipoInsumo>('material');
+
+  if (cargando) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <p style={{ color: '#7A6A5A' }}>Cargando explosión de insumos…</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div
+        className="p-4 rounded-2xl"
+        style={{ background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.30)' }}
+      >
+        <p style={{ color: '#DC2626' }} className="text-sm font-medium">
+          {error}
+        </p>
+      </div>
+    );
+  }
+
+  if (!datos) return null;
+
+  const meses = datos.plazo_meses && datos.plazo_meses > 0 ? datos.plazo_meses : 0;
+  const modoEfectivo: Modo = modo === 'calendario' && datos.fecha_inicio ? 'calendario' : 'relativo';
+  const columnas = Array.from({ length: meses }, (_, i) => i + 1);
+  const etiquetas = columnas.map((mes) =>
+    modoEfectivo === 'calendario' ? etiquetaMesCalendario(datos.fecha_inicio, mes) : `Mes ${mes}`,
+  );
+
+  const insumosDelTipo = datos.insumos.filter((i) => i.tipo === tipo);
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Tercer nivel de solapas: por tipo de insumo + toggle de encabezado */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex gap-6 px-1">
+          {TIPO_TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTipo(t.id)}
+              className="text-sm pb-2 transition-colors"
+              style={{
+                color: tipo === t.id ? '#1A1A2E' : '#6B7080',
+                fontWeight: tipo === t.id ? 600 : 500,
+                borderBottom: tipo === t.id ? '2px solid #1A1A2E' : '2px solid transparent',
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {meses > 0 && <ToggleModo modo={modo} setModo={setModo} hayFecha={!!datos.fecha_inicio} />}
+      </div>
+
+      {meses === 0 ? (
+        <div style={GLASS_CARD} className="p-6">
+          <p className="text-sm font-medium" style={{ color: '#1A1A2E' }}>
+            Esta obra todavía no tiene un plazo definido.
+          </p>
+          <p className="text-sm mt-2" style={{ color: '#6B7080' }}>
+            Definí el <span className="font-medium">plazo</span> en la solapa{' '}
+            <span className="font-medium">Cronograma</span> para ver la explosión de insumos por mes.
+          </p>
+        </div>
+      ) : insumosDelTipo.length === 0 ? (
+        <div style={GLASS_CARD} className="p-6">
+          <p className="text-sm" style={{ color: '#6B7080' }}>
+            No hay insumos de {NOMBRE_TIPO[tipo]} cargados en esta obra.
+          </p>
+        </div>
+      ) : (
+        <TablaExplosion
+          insumos={insumosDelTipo}
+          meses={meses}
+          etiquetas={etiquetas}
+          modoEfectivo={modoEfectivo}
+        />
+      )}
+    </div>
+  );
+}
+
 /* ─── Página ───────────────────────────────────────────────────────────────── */
 
 // Sub-solapas internas de Planificación (mismo patrón que las de Presupuesto).
@@ -1323,16 +1705,9 @@ export default function PlanificacionPage() {
               </>
             )}
 
-            {/* Explosión de insumos: placeholder — se construye en tareas siguientes */}
+            {/* Explosión de insumos: tabla por tipo, derivada del cronograma (solo lectura) */}
             {subtab === 'explosion' && (
-              <div style={GLASS_CARD} className="p-6">
-                <p className="text-sm font-medium" style={{ color: '#1A1A2E' }}>
-                  Explosión de insumos — en construcción
-                </p>
-                <p className="text-sm mt-2" style={{ color: '#6B7080' }}>
-                  Acá va a ir el detalle de insumos derivado del cronograma. Próximamente.
-                </p>
-              </div>
+              <ExplosionInsumos obraId={obraId} modo={modo} setModo={setModo} />
             )}
           </>
         )}
