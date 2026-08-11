@@ -1,8 +1,10 @@
 import type {
   CierrePresupuesto,
+  CompraResuelta,
   GastoGeneral,
   GastoGeneralCalculado,
   GastosGeneralesResumen,
+  InsumoCompraObra,
   PaqueteEmpresario,
   PresupuestoLinea,
   RecetaConInsumos,
@@ -64,6 +66,86 @@ export function calcularCantidadMedicion(
 ): number {
   const factor = (v?: number) => (typeof v === "number" ? v : 1);
   return factor(n) * factor(largo) * factor(ancho) * factor(alto);
+}
+
+/* ─── Conversión a unidad de compra ────────────────────────────────────────── */
+
+/**
+ * Resuelve la conversión a unidad de compra vigente para un insumo en una obra.
+ *
+ * Precedencia (regla de un solo dueño por nivel): gana el override de la obra
+ * si existe; si no, la referencia del insumo. La unidad puede venir del
+ * override o heredarse de la referencia. Sin factor válido en ninguno de los
+ * dos niveles, el insumo no tiene conversión y se muestra solo en unidad base.
+ *
+ * Es la ÚNICA implementación de esta precedencia: los endpoints la usan y el
+ * frontend consume el resultado ya resuelto, no vuelve a decidir.
+ *
+ * @param referencia Campos de compra del insumo (nivel general).
+ * @param override Fila de insumo_compra_obra de esta obra, si existe.
+ */
+export function resolverCompra(
+  referencia: { unidad_compra?: string | null; factor_compra?: number | null },
+  override?: Pick<InsumoCompraObra, "factor_compra" | "unidad_compra"> | null,
+): CompraResuelta {
+  const factorRef = numeroPositivoONull(referencia.factor_compra);
+  const unidadRef = textoONull(referencia.unidad_compra);
+
+  const factorObra = override ? numeroPositivoONull(override.factor_compra) : null;
+  const unidadObra = override ? textoONull(override.unidad_compra) : null;
+
+  // El override manda; la unidad se hereda de la referencia si no la pisó.
+  const factor = factorObra ?? factorRef;
+  const unidad = (factorObra !== null ? unidadObra ?? unidadRef : unidadRef);
+
+  // Sin factor o sin unidad no hay nada que mostrar: la conversión necesita las dos.
+  if (factor === null || unidad === null) {
+    return {
+      unidad_compra: null,
+      factor_compra: null,
+      factor_origen: null,
+      factor_referencia: factorRef,
+    };
+  }
+
+  return {
+    unidad_compra: unidad,
+    factor_compra: factor,
+    factor_origen: factorObra !== null ? "obra" : "referencia",
+    factor_referencia: factorRef,
+  };
+}
+
+function numeroPositivoONull(v: number | null | undefined): number | null {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function textoONull(v: string | null | undefined): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t === "" ? null : t;
+}
+
+/**
+ * Convierte una cantidad en unidad base a unidades de compra.
+ *
+ * Redondea SIEMPRE hacia arriba: no se compra media bolsa. La tolerancia
+ * evita que un 3859,0000000001 de acumulación en punto flotante se lleve una
+ * bolsa entera de más.
+ *
+ * @param cantidadBase Cantidad en la unidad de medida del insumo.
+ * @param factor Cuántas unidades base entran en una unidad de compra.
+ * @returns Unidades de compra enteras, o null si el factor no es convertible.
+ */
+export function convertirAUnidadCompra(
+  cantidadBase: number,
+  factor: number | null,
+): number | null {
+  if (factor === null || !Number.isFinite(factor) || factor <= 0) return null;
+  if (!Number.isFinite(cantidadBase) || cantidadBase <= 0) return 0;
+  return Math.ceil(cantidadBase / factor - 1e-9);
 }
 
 /**

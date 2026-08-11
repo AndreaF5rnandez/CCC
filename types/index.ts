@@ -5,6 +5,25 @@ export interface Insumo {
   unidad_medida: string;
   tipo: "material" | "mano_de_obra" | "equipo";
   precio_unitario: number;
+  // Referencia de compra (nullable): en qué unidad se compra el insumo y
+  // cuántas unidades de `unidad_medida` entran en una unidad de compra
+  // (ej: 'bolsa' / 25 = 25 kg por bolsa). Es el valor por defecto compartido
+  // por todas las obras; una obra puede pisarlo vía InsumoCompraObra.
+  unidad_compra?: string | null;
+  factor_compra?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Override del factor de compra para una obra puntual. Sin fila, vale la
+ *  referencia del insumo; borrar la fila vuelve a la referencia. */
+export interface InsumoCompraObra {
+  id: string;
+  obra_id: string;
+  insumo_id: string;
+  factor_compra: number;
+  // Opcional: si es null se hereda la unidad de compra del insumo.
+  unidad_compra?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -244,7 +263,23 @@ export interface PlanificacionResponse {
 
 /* ─── Explosión de insumos: respuesta de /api/explosion-insumos/[obraId] ────── */
 
-export interface ExplosionInsumo {
+/** De dónde salió el factor de compra vigente para un insumo en una obra.
+ *  null = el insumo no tiene conversión definida en ningún nivel. */
+export type FactorOrigen = "obra" | "referencia" | null;
+
+/** Conversión a unidad de compra ya resuelta (override de la obra si existe,
+ *  si no la referencia del insumo). Es el único dato que la vista consume:
+ *  el frontend no vuelve a decidir cuál gana. */
+export interface CompraResuelta {
+  unidad_compra: string | null;
+  factor_compra: number | null;
+  factor_origen: FactorOrigen;
+  // Referencia del insumo, para poder mostrar a qué valor se vuelve al borrar
+  // el override. No se usa para calcular.
+  factor_referencia: number | null;
+}
+
+export interface ExplosionInsumo extends CompraResuelta {
   insumo_id: string;
   nombre: string;
   unidad_medida: string;
@@ -263,4 +298,11 @@ export interface ExplosionInsumosResponse {
   plazo_meses: number | null;
   fecha_inicio: string;
   insumos: ExplosionInsumo[];
+}
+
+/** Respuesta de POST /api/insumo-compra-obra: el estado de la conversión ya
+ *  resuelto después de guardar (o de borrar) el override. La vista lo aplica
+ *  tal cual, sin recalcular la precedencia por su cuenta. */
+export interface InsumoCompraObraResponse extends CompraResuelta {
+  insumo_id: string;
 }

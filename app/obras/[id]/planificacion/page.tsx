@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { usePlanificacion } from '@/hooks/usePlanificacion';
 import { useExplosionInsumos } from '@/hooks/useExplosionInsumos';
+import { convertirAUnidadCompra } from '@/lib/calculos';
 import type { PlanificacionResponse, ExplosionInsumo } from '@/types';
 
 /* ─── Estilo base (skill de diseño) ────────────────────────────────────────── */
@@ -41,9 +42,12 @@ const ANCHO_MES = 92;
 const ANCHO_TOTAL = 104;
 
 // Explosión de insumos: columna de nombre (izq) y columna de total+plata (der).
-const ANCHO_INSUMO = 240;
+const ANCHO_INSUMO = 250;
 const ANCHO_UNIDAD = 76; // columna angosta de unidad de medida, fija junto a la de insumo
-const ANCHO_TOTAL_PLATA = 150;
+const ANCHO_TOTAL_PLATA = 176;
+// Los meses de la explosión son más anchos que los del cronograma: además de la
+// cantidad base pueden llevar debajo la cantidad en unidad de compra.
+const ANCHO_MES_EXPLOSION = 106;
 
 // left de la columna de unidad = justo después de la de insumo, para que queden
 // pegadas al fijarse en el scroll horizontal (mismo criterio que LEFT_INCID).
@@ -81,6 +85,16 @@ function formatCantidad(v: number, unidad: string): string {
     return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(Math.round(v));
   }
   return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 2 }).format(v);
+}
+
+/* Cantidad en unidad de compra: siempre entera (viene redondeada hacia arriba)
+ * y con la unidad pluralizada de forma simple. La unidad_compra es texto libre
+ * ("bolsa", "barra", "rollo"), así que alcanza con agregar la "s". */
+function formatCompra(unidades: number, unidadCompra: string): string {
+  const n = new Intl.NumberFormat('es-AR', { maximumFractionDigits: 0 }).format(unidades);
+  const plural =
+    unidades === 1 || unidadCompra.endsWith('s') ? unidadCompra : `${unidadCompra}s`;
+  return `${n} ${plural}`;
 }
 
 type Estado = 'guardando' | 'guardado' | 'error';
@@ -1233,6 +1247,139 @@ const NOMBRE_TIPO: Record<TipoInsumo, string> = {
   equipo: 'equipo',
 };
 
+/* Editor del factor de compra de un insumo, embebido en la celda del insumo.
+ *
+ * Lo que se guarda acá es un OVERRIDE de esta obra: la referencia del insumo
+ * (compartida con las demás obras) no se toca nunca. Vaciar el campo borra el
+ * override y el insumo vuelve a la referencia. */
+function EditorFactor({
+  insumo,
+  onGuardar,
+}: {
+  insumo: ExplosionInsumo;
+  onGuardar: (insumoId: string, factor: number | null) => Promise<void>;
+}) {
+  const factorServer = insumo.factor_compra;
+  const [texto, setTexto] = useState(factorServer !== null ? String(factorServer) : '');
+  const [estado, setEstado] = useState<Estado | undefined>(undefined);
+  const [mensaje, setMensaje] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // Resincronizar cuando el servidor devuelve un factor nuevo (al guardar el
+  // override o al borrarlo y volver a la referencia).
+  useEffect(() => {
+    setTexto(factorServer !== null ? String(factorServer) : '');
+  }, [factorServer]);
+
+  useEffect(() => () => clearTimeout(timer.current), []);
+
+  const persistir = useCallback(
+    async (valor: number | null) => {
+      // Sin cambio real respecto de lo vigente: no se pega al servidor.
+      if (valor === factorServer) {
+        setEstado(undefined);
+        setMensaje(null);
+        return;
+      }
+
+      setEstado('guardando');
+      setMensaje(null);
+      try {
+        await onGuardar(insumo.insumo_id, valor);
+        setEstado('guardado');
+        clearTimeout(timer.current);
+        timer.current = setTimeout(() => setEstado(undefined), 1300);
+      } catch (e) {
+        setEstado('error');
+        setMensaje(e instanceof Error ? e.message : 'No se pudo guardar el factor de compra');
+      }
+    },
+    [factorServer, insumo.insumo_id, onGuardar],
+  );
+
+  const commit = useCallback(() => {
+    const limpio = texto.trim().replace(',', '.');
+    const valor = limpio === '' ? null : Number(limpio);
+
+    if (valor !== null && (!Number.isFinite(valor) || valor <= 0)) {
+      setEstado('error');
+      setMensaje('El factor tiene que ser un número mayor a 0');
+      return;
+    }
+    void persistir(valor);
+  }, [texto, persistir]);
+
+  const esOverride = insumo.factor_origen === 'obra';
+  const ring =
+    estado === 'error'
+      ? '0 0 0 2px rgba(239, 68, 68, 0.55)'
+      : estado === 'guardado'
+      ? '0 0 0 2px rgba(34, 197, 94, 0.45)'
+      : undefined;
+
+  return (
+    <div className="flex flex-col gap-0.5 mt-1">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px]" style={{ color: '#9CA3AF' }}>
+          ÷
+        </span>
+        <input
+          type="number"
+          min="0"
+          step="any"
+          inputMode="decimal"
+          value={texto}
+          onChange={(e) => setTexto(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          }}
+          className="text-right font-mono tabular-nums text-[11px] rounded-[8px] px-1.5 py-0.5 focus:outline-none focus:border-[#C8E64C] transition-shadow"
+          style={{
+            width: 52,
+            border: '1px solid rgba(0,0,0,0.12)',
+            background: 'rgba(255,255,255,0.6)',
+            color: '#1A1A2E',
+            boxShadow: ring,
+          }}
+          aria-label={`Factor de compra de ${insumo.nombre}`}
+          aria-invalid={estado === 'error'}
+          title={`Cuántos ${insumo.unidad_medida} entran en 1 ${insumo.unidad_compra}. Se guarda solo para esta obra.`}
+        />
+        <span className="text-[11px] truncate" style={{ color: '#6B7080' }}>
+          {insumo.unidad_medida}/{insumo.unidad_compra}
+        </span>
+        {estado === 'guardando' && (
+          <span
+            className="rounded-full shrink-0"
+            style={{ width: 6, height: 6, background: '#F59E0B' }}
+          />
+        )}
+        {esOverride && estado !== 'guardando' && (
+          <button
+            type="button"
+            onClick={() => void persistir(null)}
+            className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 transition-colors"
+            style={{ background: 'rgba(200, 230, 76, 0.45)', color: '#2A3300' }}
+            title={
+              insumo.factor_referencia !== null
+                ? `Valor propio de esta obra. Volver a la referencia (${insumo.factor_referencia} ${insumo.unidad_medida})`
+                : 'Valor propio de esta obra. Quitar la conversión'
+            }
+          >
+            obra ✕
+          </button>
+        )}
+      </div>
+      {estado === 'error' && mensaje && (
+        <span className="text-[10px]" style={{ color: '#DC2626' }}>
+          {mensaje}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /* Tabla de un tipo de insumo: filas = insumos, columnas = meses. Solo lectura.
  * Columna de insumo fija a la izquierda, columna de total fija a la derecha,
  * encabezado de meses fijo arriba y fila de plata por mes fija abajo. */
@@ -1241,11 +1388,13 @@ function TablaExplosion({
   meses,
   etiquetas,
   modoEfectivo,
+  guardarFactorCompra,
 }: {
   insumos: ExplosionInsumo[];
   meses: number;
   etiquetas: string[];
   modoEfectivo: Modo;
+  guardarFactorCompra: (insumoId: string, factor: number | null) => Promise<void>;
 }) {
   const columnas = Array.from({ length: meses }, (_, i) => i + 1);
 
@@ -1317,8 +1466,8 @@ function TablaExplosion({
                   position: 'sticky',
                   top: 0,
                   zIndex: 20,
-                  width: ANCHO_MES,
-                  minWidth: ANCHO_MES,
+                  width: ANCHO_MES_EXPLOSION,
+                  minWidth: ANCHO_MES_EXPLOSION,
                   background: BG_HEADER,
                   backdropFilter: 'blur(8px)',
                   fontSize: '13px',
@@ -1359,6 +1508,10 @@ function TablaExplosion({
         <tbody>
           {insumos.map((ins) => {
             const plataTotal = ins.total * ins.precio_unitario;
+            const compraTotal =
+              ins.unidad_compra !== null
+                ? convertirAUnidadCompra(ins.total, ins.factor_compra)
+                : null;
             return (
               <tr key={ins.insumo_id} className="hover:bg-black/[0.015] transition-colors">
                 <td
@@ -1380,6 +1533,12 @@ function TablaExplosion({
                   <div className="text-xs" style={{ color: '#9CA3AF' }}>
                     {formatPrecio(ins.precio_unitario)}/{ins.unidad_medida}
                   </div>
+                  {/* Factor de compra: solo para insumos que tienen conversión
+                    * definida (referencia u override). Los que no, se muestran
+                    * igual que antes, solo en unidad base. */}
+                  {ins.unidad_compra !== null && (
+                    <EditorFactor insumo={ins} onGuardar={guardarFactorCompra} />
+                  )}
                 </td>
                 {/* Unidad de medida del insumo: en qué está expresada la fila */}
                 <td
@@ -1403,17 +1562,31 @@ function TablaExplosion({
                 </td>
                 {columnas.map((mes) => {
                   const q = ins.consumo_por_mes[mes - 1] ?? 0;
+                  // Cuánto comprar ese mes, en la unidad del proveedor.
+                  const compraMes =
+                    q > 0 && ins.unidad_compra !== null
+                      ? convertirAUnidadCompra(q, ins.factor_compra)
+                      : null;
                   return (
                     <td
                       key={mes}
-                      className="px-2 py-2 text-right font-mono tabular-nums"
+                      className="px-2 py-2 text-right"
                       style={{
                         borderBottom: '1px solid rgba(0,0,0,0.04)',
-                        fontSize: '13px',
                         color: q > 0 ? '#1A1A2E' : '#C4C4CC',
                       }}
                     >
-                      {q > 0 ? formatCantidad(q, ins.unidad_medida) : '—'}
+                      <div className="font-mono tabular-nums" style={{ fontSize: '13px' }}>
+                        {q > 0 ? formatCantidad(q, ins.unidad_medida) : '—'}
+                      </div>
+                      {compraMes !== null && ins.unidad_compra !== null && (
+                        <div
+                          className="font-mono tabular-nums truncate"
+                          style={{ fontSize: '10px', color: '#6B7080' }}
+                        >
+                          {formatCompra(compraMes, ins.unidad_compra)}
+                        </div>
+                      )}
                     </td>
                   );
                 })}
@@ -1434,6 +1607,16 @@ function TablaExplosion({
                   <div className="font-mono tabular-nums" style={{ fontSize: '13px', fontWeight: 600, color: '#1A1A2E' }}>
                     {formatCantidad(ins.total, ins.unidad_medida)} {ins.unidad_medida}
                   </div>
+                  {/* Cuánto comprar en toda la obra, en la unidad del proveedor.
+                    * Es el dato que el usuario se lleva para pedir precio. */}
+                  {compraTotal !== null && ins.unidad_compra !== null && (
+                    <div
+                      className="font-mono tabular-nums"
+                      style={{ fontSize: '12px', fontWeight: 600, color: '#5C7C00' }}
+                    >
+                      {formatCompra(compraTotal, ins.unidad_compra)}
+                    </div>
+                  )}
                   <div className="font-mono tabular-nums" style={{ fontSize: '11px', color: '#6B7080' }}>
                     {formatPrecio(plataTotal)}
                   </div>
@@ -1535,7 +1718,7 @@ function ExplosionInsumos({
   modo: Modo;
   setModo: (m: Modo) => void;
 }) {
-  const { datos, cargando, error } = useExplosionInsumos(obraId);
+  const { datos, cargando, error, guardarFactorCompra } = useExplosionInsumos(obraId);
   const [tipo, setTipo] = useState<TipoInsumo>('material');
 
   if (cargando) {
@@ -1615,6 +1798,7 @@ function ExplosionInsumos({
           meses={meses}
           etiquetas={etiquetas}
           modoEfectivo={modoEfectivo}
+          guardarFactorCompra={guardarFactorCompra}
         />
       )}
     </div>

@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
-import { calcularCantidadTotalItem } from "@/lib/calculos";
+import { calcularCantidadTotalItem, resolverCompra } from "@/lib/calculos";
 import { loguearError } from "@/lib/apiError";
 import type {
   Rubro,
   Item,
   Insumo,
+  InsumoCompraObra,
   RecetaConInsumos,
   Planificacion,
   ExplosionInsumo,
@@ -22,6 +23,11 @@ type ItemExplosion = Item & {
 };
 type RubroExplosion = Rubro & { items: ItemExplosion[] };
 
+type OverrideCompra = Pick<
+  InsumoCompraObra,
+  "insumo_id" | "factor_compra" | "unidad_compra"
+>;
+
 // Acumulador interno por insumo: metadatos + vector de consumo por mes.
 type AcumInsumo = {
   insumo_id: string;
@@ -29,6 +35,9 @@ type AcumInsumo = {
   unidad_medida: string;
   tipo: Insumo["tipo"];
   precio_unitario: number;
+  // Referencia de compra del insumo; el override de la obra se aplica al final.
+  unidad_compra: string | null;
+  factor_compra: number | null;
   consumo_por_mes: number[]; // índice 0 = mes 1
 };
 
@@ -95,6 +104,30 @@ export async function GET(
 
     const rubros = (rubrosData ?? []) as RubroExplosion[];
 
+    // Overrides de compra de ESTA obra. Pisan la referencia del insumo sin
+    // afectar a las demás obras; se resuelven al armar la respuesta.
+    const { data: overridesData, error: overridesError } = await supabase
+      .from("insumo_compra_obra")
+      .select("insumo_id, factor_compra, unidad_compra")
+      .eq("obra_id", params.obraId);
+
+    // 42P01 = la tabla todavía no existe: la migración 009 se aplica a mano en
+    // Supabase y puede ir por detrás del deploy. En ese caso la explosión sigue
+    // funcionando sin conversión de compra en vez de romper entera; cualquier
+    // otro error sí es un error de verdad.
+    if (overridesError && overridesError.code !== "42P01") throw overridesError;
+    if (overridesError) {
+      console.warn(
+        "[GET /api/explosion-insumos/[obraId]] Falta la tabla insumo_compra_obra: " +
+          "ejecutá supabase/migrations/009_unidad_compra.sql. " +
+          "La explosión se muestra sin conversión a unidad de compra.",
+      );
+    }
+
+    const overridePorInsumo = new Map<string, OverrideCompra>(
+      ((overridesData ?? []) as OverrideCompra[]).map((o) => [o.insumo_id, o]),
+    );
+
     // Meses de la grilla: 1..plazo_meses. Los porcentajes cargados en meses
     // fuera de ese rango (huérfanos por un recorte de plazo) NO se cuentan,
     // igual que el cronograma, que solo itera hasta plazo_meses.
@@ -111,6 +144,11 @@ export async function GET(
           unidad_medida: insumo.unidad_medida,
           tipo: insumo.tipo,
           precio_unitario: Number(insumo.precio_unitario),
+          unidad_compra: insumo.unidad_compra ?? null,
+          factor_compra:
+            insumo.factor_compra === null || insumo.factor_compra === undefined
+              ? null
+              : Number(insumo.factor_compra),
           consumo_por_mes: new Array<number>(meses).fill(0),
         };
         porInsumo.set(insumo.id, acum);
@@ -161,6 +199,12 @@ export async function GET(
         precio_unitario: a.precio_unitario,
         consumo_por_mes: a.consumo_por_mes,
         total: a.consumo_por_mes.reduce((s, v) => s + v, 0),
+        // Conversión a unidad de compra ya resuelta (override de la obra sobre
+        // referencia del insumo). La vista solo la muestra.
+        ...resolverCompra(
+          { unidad_compra: a.unidad_compra, factor_compra: a.factor_compra },
+          overridePorInsumo.get(a.insumo_id) ?? null,
+        ),
       }))
       // Orden estable para la vista: por tipo y, dentro del tipo, por nombre.
       .sort((x, y) =>
