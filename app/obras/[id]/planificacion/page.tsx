@@ -42,7 +42,12 @@ const ANCHO_TOTAL = 104;
 
 // Explosión de insumos: columna de nombre (izq) y columna de total+plata (der).
 const ANCHO_INSUMO = 240;
+const ANCHO_UNIDAD = 76; // columna angosta de unidad de medida, fija junto a la de insumo
 const ANCHO_TOTAL_PLATA = 150;
+
+// left de la columna de unidad = justo después de la de insumo, para que queden
+// pegadas al fijarse en el scroll horizontal (mismo criterio que LEFT_INCID).
+const LEFT_UNIDAD = ANCHO_INSUMO;
 
 // left de la columna de incidencia = justo después de la de ítems (deben coincidir
 // con el ancho renderizado de la columna de ítems para que queden pegadas al fijar).
@@ -1282,6 +1287,28 @@ function TablaExplosion({
             >
               Insumo
             </th>
+            {/* Unidad de medida: columna propia, fija junto a la de insumo */}
+            <th
+              className="text-left px-3 py-3"
+              style={{
+                position: 'sticky',
+                top: 0,
+                left: LEFT_UNIDAD,
+                zIndex: 30,
+                width: ANCHO_UNIDAD,
+                minWidth: ANCHO_UNIDAD,
+                background: BG_CORNER,
+                backdropFilter: 'blur(8px)',
+                fontSize: '13px',
+                fontWeight: 600,
+                color: '#6B7080',
+                borderBottom: '1px solid rgba(0,0,0,0.08)',
+                borderRight: '1px solid rgba(0,0,0,0.06)',
+              }}
+              title="Unidad de medida en la que se expresan las cantidades de la fila"
+            >
+              Unidad
+            </th>
             {columnas.map((mes) => (
               <th
                 key={mes}
@@ -1351,8 +1378,28 @@ function TablaExplosion({
                     {ins.nombre}
                   </div>
                   <div className="text-xs" style={{ color: '#9CA3AF' }}>
-                    {ins.unidad_medida} · {formatPrecio(ins.precio_unitario)}/{ins.unidad_medida}
+                    {formatPrecio(ins.precio_unitario)}/{ins.unidad_medida}
                   </div>
+                </td>
+                {/* Unidad de medida del insumo: en qué está expresada la fila */}
+                <td
+                  className="px-3 py-2"
+                  style={{
+                    position: 'sticky',
+                    left: LEFT_UNIDAD,
+                    zIndex: 10,
+                    width: ANCHO_UNIDAD,
+                    minWidth: ANCHO_UNIDAD,
+                    background: BG_STICKY_LEFT,
+                    backdropFilter: 'blur(8px)',
+                    borderBottom: '1px solid rgba(0,0,0,0.04)',
+                    borderRight: '1px solid rgba(0,0,0,0.06)',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    color: '#1A1A2E',
+                  }}
+                >
+                  {ins.unidad_medida}
                 </td>
                 {columnas.map((mes) => {
                   const q = ins.consumo_por_mes[mes - 1] ?? 0;
@@ -1418,6 +1465,21 @@ function TablaExplosion({
             >
               Plata por mes
             </td>
+            {/* Celda vacía bajo la columna de unidad, para no desalinear los meses */}
+            <td
+              style={{
+                position: 'sticky',
+                left: LEFT_UNIDAD,
+                bottom: 0,
+                zIndex: 30,
+                width: ANCHO_UNIDAD,
+                minWidth: ANCHO_UNIDAD,
+                background: BG_FOOTER,
+                backdropFilter: 'blur(8px)',
+                borderTop: '2px solid rgba(0,0,0,0.10)',
+                borderRight: '1px solid rgba(0,0,0,0.06)',
+              }}
+            />
             {columnas.map((mes) => (
               <td
                 key={mes}
