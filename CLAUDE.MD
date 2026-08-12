@@ -22,7 +22,11 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 **Reglas críticas de DB:**
 - `cantidad_calculada` = `n × COALESCE(largo,1) × COALESCE(ancho,1) × COALESCE(alto,1)` — GENERATED ALWAYS, nunca enviarlo desde backend
 - Columnas reales: `unidad_medida`, `precio_unitario` (NO `unidad` ni `precio`)
-- RLS desactivado en rubros, items y mediciones
+- **RLS activo por usuario** en obras, insumos, recetas, receta_insumos, rubros, items,
+  mediciones e insumo_compra_obra (ver `003_rls.sql` y `009_unidad_compra.sql`). Las tablas
+  hijas no tienen `user_id`: llegan al dueño con un EXISTS vía `obras.user_id` (o
+  `recetas.user_id`). Una tabla nueva colgada de una obra necesita sus 4 políticas.
+- Excepción: `planificacion` quedó sin RLS. Es una deuda, no el criterio a copiar.
 
 ## APIs disponibles
 - `GET/POST /api/insumos` — filtro `?tipo=`

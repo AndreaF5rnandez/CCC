@@ -55,8 +55,34 @@ CREATE TABLE IF NOT EXISTS insumo_compra_obra (
 CREATE INDEX IF NOT EXISTS idx_insumo_compra_obra_obra_id
   ON insumo_compra_obra(obra_id);
 
--- ── RLS desactivado, igual que planificacion, items y mediciones ─
-ALTER TABLE insumo_compra_obra DISABLE ROW LEVEL SECURITY;
+-- ── RLS por usuario, vía la obra dueña del override ─────────────
+-- Mismo patrón que rubros/items/mediciones en 003_rls.sql: la fila no tiene
+-- user_id propio, se llega al dueño a través de obras.user_id.
+-- (La tabla planificacion quedó sin RLS, pero es la excepción del esquema,
+--  no el criterio a seguir.)
+ALTER TABLE insumo_compra_obra ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "insumo_compra_obra_select" ON insumo_compra_obra;
+CREATE POLICY "insumo_compra_obra_select" ON insumo_compra_obra FOR SELECT USING (
+  EXISTS (SELECT 1 FROM obras WHERE obras.id = insumo_compra_obra.obra_id AND obras.user_id = auth.uid())
+);
+
+DROP POLICY IF EXISTS "insumo_compra_obra_insert" ON insumo_compra_obra;
+CREATE POLICY "insumo_compra_obra_insert" ON insumo_compra_obra FOR INSERT WITH CHECK (
+  EXISTS (SELECT 1 FROM obras WHERE obras.id = insumo_compra_obra.obra_id AND obras.user_id = auth.uid())
+);
+
+-- Sin WITH CHECK explícito, Postgres aplica el USING también a la fila nueva,
+-- que es lo que necesita el upsert (INSERT ... ON CONFLICT DO UPDATE).
+DROP POLICY IF EXISTS "insumo_compra_obra_update" ON insumo_compra_obra;
+CREATE POLICY "insumo_compra_obra_update" ON insumo_compra_obra FOR UPDATE USING (
+  EXISTS (SELECT 1 FROM obras WHERE obras.id = insumo_compra_obra.obra_id AND obras.user_id = auth.uid())
+);
+
+DROP POLICY IF EXISTS "insumo_compra_obra_delete" ON insumo_compra_obra;
+CREATE POLICY "insumo_compra_obra_delete" ON insumo_compra_obra FOR DELETE USING (
+  EXISTS (SELECT 1 FROM obras WHERE obras.id = insumo_compra_obra.obra_id AND obras.user_id = auth.uid())
+);
 
 -- ── Trigger para updated_at ─────────────────────────────────────
 -- set_updated_at() ya fue definida en 001_initial_schema.sql
