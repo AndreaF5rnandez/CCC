@@ -6,6 +6,7 @@ import type {
   CertificacionItemsResponse,
   CertificacionMedicion,
   CertificacionRubroDisponible,
+  MedicionCertificada,
 } from "@/types";
 
 // Shape crudo de la lectura anidada.
@@ -115,10 +116,44 @@ export async function GET(request: NextRequest) {
         })),
     }));
 
+    /* Qué mediciones de esta obra ya se certificaron. Va en la misma respuesta
+     * que el árbol para que la vista no tenga que cruzar dos llamadas, y es una
+     * sola consulta para toda la obra: el !inner sobre certificaciones acota
+     * por obra sin traer las certificaciones enteras. */
+    const { data: certData, error: certError } = await supabase
+      .from("certificacion_mediciones")
+      .select("medicion_id, certificacion_id, certificaciones!inner(obra_id, fecha)")
+      .eq("certificaciones.obra_id", obra_id);
+
+    // 42P01 = falta correr la migración 012. Sin esa tabla no se puede saber
+    // qué se certificó, así que no se marca nada: es el comportamiento previo,
+    // no un error que deba tirar la pantalla abajo.
+    if (certError && certError.code !== "42P01") throw certError;
+    if (certError) {
+      console.warn(
+        "[GET /api/certificacion-items] Falta la tabla certificacion_mediciones: " +
+          "ejecutá supabase/migrations/012_certificacion_mediciones.sql. " +
+          "No se marcan las mediciones ya certificadas.",
+      );
+    }
+
+    const certificadas: MedicionCertificada[] = (
+      (certData ?? []) as unknown as Array<{
+        medicion_id: string;
+        certificacion_id: string;
+        certificaciones: { fecha: string } | null;
+      }>
+    ).map((fila) => ({
+      medicion_id: fila.medicion_id,
+      certificacion_id: fila.certificacion_id,
+      fecha: fila.certificaciones?.fecha ?? "",
+    }));
+
     const response: CertificacionItemsResponse = {
       obra_id,
       obra_nombre: obra.nombre,
       rubros,
+      certificadas,
     };
 
     return NextResponse.json(response, { status: 200 });

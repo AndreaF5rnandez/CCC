@@ -319,6 +319,10 @@ export interface InsumoCompraObraResponse extends CompraResuelta {
 export interface CertificacionItemEjecutado {
   item_id: string;
   cantidad_ejecutada?: number | null;
+  /** Qué mediciones del ítem se ejecutaron. Solo se usa al guardar (tabla
+   *  `certificacion_mediciones`): el cálculo del previsto trabaja con
+   *  `cantidad_ejecutada`, que ya viene sumada. */
+  medicion_ids?: string[];
 }
 
 /** Body de POST /api/certificacion-previsto. */
@@ -387,12 +391,23 @@ export interface CertificacionRubroDisponible {
   items: CertificacionItemDisponible[];
 }
 
+/** Una medición que ya fue certificada en una certificación anterior.
+ *  La fecha se muestra en la marca, para que el encargado sepa cuándo. */
+export interface MedicionCertificada {
+  medicion_id: string;
+  certificacion_id: string;
+  fecha: string;
+}
+
 /** Respuesta de GET /api/certificacion-items?obra_id=.
  *  Es el árbol que se tilda en la vista de Registrar. */
 export interface CertificacionItemsResponse {
   obra_id: string;
   obra_nombre: string;
   rubros: CertificacionRubroDisponible[];
+  // Mediciones ya certificadas en esta obra, para no ofrecerlas de nuevo.
+  // Vacío si la migración 012 todavía no se aplicó, o si no hay nada certificado.
+  certificadas: MedicionCertificada[];
 }
 
 /* ─── Certificación: registro guardado y desvío ────────────────────────────── */

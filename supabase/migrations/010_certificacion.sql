@@ -16,7 +16,7 @@
 -- ================================================================
 
 -- ── 1. Tabla certificaciones ────────────────────────────────────
-CREATE TABLE certificaciones (
+CREATE TABLE IF NOT EXISTS certificaciones (
   id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   obra_id     uuid        NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
   fecha       date        NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE certificaciones (
 
 -- ── 2. Tabla certificacion_items ────────────────────────────────
 -- Qué ítems del cómputo se ejecutaron en esa certificación.
-CREATE TABLE certificacion_items (
+CREATE TABLE IF NOT EXISTS certificacion_items (
   id               uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   certificacion_id uuid        NOT NULL REFERENCES certificaciones(id) ON DELETE CASCADE,
   item_id          uuid        NOT NULL REFERENCES items(id)           ON DELETE CASCADE,
@@ -39,7 +39,7 @@ CREATE TABLE certificacion_items (
 
 -- ── 3. Tabla certificacion_insumos ──────────────────────────────
 -- Material real consumido por el grupo de ítems de esa certificación.
-CREATE TABLE certificacion_insumos (
+CREATE TABLE IF NOT EXISTS certificacion_insumos (
   id               uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   certificacion_id uuid        NOT NULL REFERENCES certificaciones(id) ON DELETE CASCADE,
   insumo_id        uuid        NOT NULL REFERENCES insumos(id)         ON DELETE CASCADE,
@@ -50,11 +50,11 @@ CREATE TABLE certificacion_insumos (
 
 
 -- ── 4. Índices ──────────────────────────────────────────────────
-CREATE INDEX idx_certificaciones_obra_id           ON certificaciones(obra_id);
-CREATE INDEX idx_certificacion_items_cert_id       ON certificacion_items(certificacion_id);
-CREATE INDEX idx_certificacion_items_item_id       ON certificacion_items(item_id);
-CREATE INDEX idx_certificacion_insumos_cert_id     ON certificacion_insumos(certificacion_id);
-CREATE INDEX idx_certificacion_insumos_insumo_id   ON certificacion_insumos(insumo_id);
+CREATE INDEX IF NOT EXISTS idx_certificaciones_obra_id           ON certificaciones(obra_id);
+CREATE INDEX IF NOT EXISTS idx_certificacion_items_cert_id       ON certificacion_items(certificacion_id);
+CREATE INDEX IF NOT EXISTS idx_certificacion_items_item_id       ON certificacion_items(item_id);
+CREATE INDEX IF NOT EXISTS idx_certificacion_insumos_cert_id     ON certificacion_insumos(certificacion_id);
+CREATE INDEX IF NOT EXISTS idx_certificacion_insumos_insumo_id   ON certificacion_insumos(insumo_id);
 
 
 -- ── 5. Activar RLS ──────────────────────────────────────────────

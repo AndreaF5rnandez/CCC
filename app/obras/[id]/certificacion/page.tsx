@@ -15,7 +15,10 @@ import {
   cantidadEjecutada,
   estadoDelItem,
   estadoDelRubro,
+  certificadasDelItem,
+  itemCompletamenteCertificado,
   itemsEjecutados,
+  type Disponibilidad,
   type EstadoTilde,
   type Seleccion,
 } from '@/lib/certificacionSeleccion';
@@ -145,10 +148,12 @@ function CheckTriestado({
   estado,
   onChange,
   className,
+  disabled,
 }: {
   estado: EstadoTilde;
   onChange: () => void;
   className?: string;
+  disabled?: boolean;
 }) {
   const ref = useRef<HTMLInputElement>(null);
 
@@ -162,7 +167,11 @@ function CheckTriestado({
       type="checkbox"
       checked={estado === 'todas'}
       onChange={onChange}
-      className={className ?? 'w-4 h-4 cursor-pointer shrink-0'}
+      disabled={disabled}
+      className={
+        (className ?? 'w-4 h-4 shrink-0') +
+        (disabled ? ' cursor-not-allowed' : ' cursor-pointer')
+      }
       style={{ accentColor: ACENTO }}
     />
   );
@@ -183,11 +192,13 @@ function VistaRegistrar({
   calcularPrevisto,
   crearCertificacion,
   conversiones,
+  recargarItems,
 }: {
   datos: CertificacionItemsResponse;
   calcularPrevisto: CertificacionesHook['calcularPrevisto'];
   crearCertificacion: CertificacionesHook['crearCertificacion'];
   conversiones: Map<string, InsumoCompraObraResponse>;
+  recargarItems: () => Promise<void>;
 }) {
   // Solo materiales: esta fase de certificación no carga mano de obra ni equipo.
   const { insumos: materiales } = useInsumos('material');
@@ -196,6 +207,20 @@ function VistaRegistrar({
   const [descripcion, setDescripcion] = useState('');
   const [seleccion, setSeleccion] = useState<Seleccion>(SELECCION_VACIA);
   const [expandidos, setExpandidos] = useState<Set<string>>(new Set());
+  // Mediciones reabiertas a mano en esta sesión de carga.
+  const [reabiertas, setReabiertas] = useState<Set<string>>(new Set());
+
+  /* Qué se puede tildar: lo ya certificado queda afuera salvo que se reabra.
+   * La lista de certificadas viene con el árbol, en la misma consulta. */
+  const certificadasPorId = useMemo(
+    () => new Map(datos.certificadas.map((c) => [c.medicion_id, c])),
+    [datos.certificadas],
+  );
+
+  const disponibilidad: Disponibilidad = useMemo(
+    () => ({ certificadas: new Set(certificadasPorId.keys()), reabiertas }),
+    [certificadasPorId, reabiertas],
+  );
 
   const [previstos, setPrevistos] = useState<CertificacionInsumoPrevisto[]>([]);
   const [calculando, setCalculando] = useState(false);
@@ -216,8 +241,8 @@ function VistaRegistrar({
    * la SUMA de las mediciones seleccionadas. El backend ya sabe calcular el
    * previsto proporcional a esa cantidad; acá no se recalcula nada. */
   const ejecutados = useMemo(
-    () => itemsEjecutados(datos.rubros, seleccion),
-    [datos.rubros, seleccion],
+    () => itemsEjecutados(datos.rubros, seleccion, disponibilidad),
+    [datos.rubros, seleccion, disponibilidad],
   );
 
   const itemIds = useMemo(() => ejecutados.map((e) => e.item_id), [ejecutados]);
@@ -282,14 +307,26 @@ function VistaRegistrar({
     setExito(null);
   }, []);
 
-  /** El checkbox del ítem tilda o destilda todas sus mediciones de una. */
-  const alternarItem = useCallback((item: CertificacionItemDisponible) => {
-    setSeleccion((prev) => alternarItemEn(item, prev));
-    setExito(null);
-  }, []);
+  /** El checkbox del ítem tilda o destilda sus mediciones DISPONIBLES. */
+  const alternarItem = useCallback(
+    (item: CertificacionItemDisponible) => {
+      setSeleccion((prev) => alternarItemEn(item, prev, disponibilidad));
+      setExito(null);
+    },
+    [disponibilidad],
+  );
 
-  const alternarRubro = useCallback((rubro: CertificacionRubroDisponible) => {
-    setSeleccion((prev) => alternarRubroEn(rubro, prev));
+  const alternarRubro = useCallback(
+    (rubro: CertificacionRubroDisponible) => {
+      setSeleccion((prev) => alternarRubroEn(rubro, prev, disponibilidad));
+      setExito(null);
+    },
+    [disponibilidad],
+  );
+
+  /** Reabrir es deliberado: devuelve la medición al conjunto tildable. */
+  const reabrir = useCallback((medicionId: string) => {
+    setReabiertas((prev) => new Set(prev).add(medicionId));
     setExito(null);
   }, []);
 
@@ -352,6 +389,7 @@ function VistaRegistrar({
   const limpiar = useCallback(() => {
     setSeleccion(SELECCION_VACIA);
     setExpandidos(new Set());
+    setReabiertas(new Set());
     setReales({});
     setExtras([]);
     setDescripcion('');
@@ -400,13 +438,25 @@ function VistaRegistrar({
         insumos,
       });
       limpiar();
+      // Sin esto, las mediciones recién certificadas seguirían apareciendo
+      // disponibles hasta recargar la página.
+      await recargarItems();
       setExito('Certificación guardada. Podés verla en la solapa Histórico.');
     } catch (err) {
       setErrorGuardar((err as Error).message);
     } finally {
       setGuardando(false);
     }
-  }, [ejecutados, filasMaterial, reales, fecha, descripcion, crearCertificacion, limpiar]);
+  }, [
+    ejecutados,
+    filasMaterial,
+    reales,
+    fecha,
+    descripcion,
+    crearCertificacion,
+    limpiar,
+    recargarItems,
+  ]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -477,7 +527,7 @@ function VistaRegistrar({
 
         <div className="flex flex-col gap-5">
           {datos.rubros.map((rubro) => {
-            const estadoRubro: EstadoTilde = estadoDelRubro(rubro, seleccion);
+            const estadoRubro: EstadoTilde = estadoDelRubro(rubro, seleccion, disponibilidad);
 
             return (
               <div key={rubro.rubro_id}>
@@ -496,19 +546,22 @@ function VistaRegistrar({
                 </div>
 
                 {rubro.items.map((item) => {
-                  const estado = estadoDelItem(item, seleccion);
+                  const estado = estadoDelItem(item, seleccion, disponibilidad);
                   const abierto = expandidos.has(item.item_id);
                   // Un ítem con una sola medición (o ninguna) no necesita
                   // desplegarse: tildarlo ya es toda la decisión.
                   const desplegable = item.mediciones.length > 1;
                   const ejecutado = cantidadEjecutada(item, seleccion);
+                  const yaCertificadas = certificadasDelItem(item, disponibilidad);
+                  const completo = itemCompletamenteCertificado(item, disponibilidad);
 
                   return (
-                    <div key={item.item_id}>
+                    <div key={item.item_id} style={{ opacity: completo ? 0.55 : 1 }}>
                       <div className="flex items-center gap-3 py-2 px-1 rounded-lg transition-colors hover:bg-black/[0.02]">
                         <CheckTriestado
                           estado={estado}
                           onChange={() => alternarItem(item)}
+                          disabled={completo}
                         />
 
                         {desplegable ? (
@@ -529,8 +582,11 @@ function VistaRegistrar({
                             <span className="text-sm truncate" style={{ color: TEXTO }}>
                               {item.descripcion}
                             </span>
+                            {/* Avance: cuántas paredes ya se certificaron. */}
                             <span className="text-xs shrink-0" style={{ color: TEXTO_3 }}>
-                              {item.mediciones.length} mediciones
+                              {yaCertificadas > 0
+                                ? `${yaCertificadas} de ${item.mediciones.length} certificadas`
+                                : `${item.mediciones.length} mediciones`}
                             </span>
                           </button>
                         ) : (
@@ -538,6 +594,8 @@ function VistaRegistrar({
                             {item.descripcion}
                           </span>
                         )}
+
+                        {completo && <Chip severidad="en_linea" texto="certificado" />}
 
                         {/* Con selección parcial se muestra lo ejecutado sobre
                             el total, para no perder de vista la proporción. */}
@@ -572,16 +630,27 @@ function VistaRegistrar({
                         >
                           {item.mediciones.map((m) => {
                             const dims = dimensiones(m);
+                            const cert = certificadasPorId.get(m.id);
+                            const reabierta = reabiertas.has(m.id);
+                            // Bloqueada = ya certificada y todavía no reabierta.
+                            const bloqueada = cert !== undefined && !reabierta;
+
+                            const Fila = bloqueada ? 'div' : 'label';
                             return (
-                              <label
+                              <Fila
                                 key={m.id}
-                                className="flex items-center gap-3 py-1.5 px-1 cursor-pointer rounded-lg transition-colors hover:bg-black/[0.02]"
+                                className={
+                                  'flex items-center gap-3 py-1.5 px-1 rounded-lg transition-colors ' +
+                                  (bloqueada ? '' : 'cursor-pointer hover:bg-black/[0.02]')
+                                }
+                                style={{ opacity: bloqueada ? 0.5 : 1 }}
                               >
                                 <input
                                   type="checkbox"
                                   checked={seleccion.mediciones.has(m.id)}
                                   onChange={() => alternarMedicion(m.id)}
-                                  className="w-4 h-4 cursor-pointer shrink-0"
+                                  disabled={bloqueada}
+                                  className="w-4 h-4 shrink-0 disabled:cursor-not-allowed"
                                   style={{ accentColor: ACENTO }}
                                 />
                                 <span
@@ -590,6 +659,34 @@ function VistaRegistrar({
                                 >
                                   {m.descripcion}
                                 </span>
+
+                                {cert && (
+                                  <span
+                                    className="text-[11px] px-2 py-0.5 rounded-full shrink-0 whitespace-nowrap"
+                                    style={{
+                                      background: reabierta
+                                        ? 'rgba(245, 166, 35, 0.15)'
+                                        : 'rgba(107, 112, 128, 0.12)',
+                                      color: reabierta ? '#B45309' : TEXTO_2,
+                                    }}
+                                  >
+                                    {reabierta
+                                      ? 'reabierta'
+                                      : `ya certificada${cert.fecha ? ` · ${formatFecha(cert.fecha)}` : ''}`}
+                                  </span>
+                                )}
+
+                                {/* Reabrir: gesto deliberado, solo para corregir. */}
+                                {bloqueada && (
+                                  <button
+                                    onClick={() => reabrir(m.id)}
+                                    className="text-[11px] font-medium px-2 py-0.5 rounded-full shrink-0 transition-colors hover:bg-black/[0.06]"
+                                    style={{ color: TEXTO_2, border: BORDE_SUTIL }}
+                                  >
+                                    Reabrir
+                                  </button>
+                                )}
+
                                 {dims && (
                                   <span
                                     className="text-xs tabular-nums shrink-0"
@@ -607,7 +704,7 @@ function VistaRegistrar({
                                 <span className="text-xs w-10 shrink-0" style={{ color: TEXTO_3 }}>
                                   {item.unidad_medida}
                                 </span>
-                              </label>
+                              </Fila>
                             );
                           })}
                         </div>
@@ -1309,7 +1406,7 @@ export default function CertificacionPage() {
    * planificación, con exactamente la forma que necesita el checklist (y de ahí
    * sale también el nombre de la obra). Se reutiliza en vez de pedir rubros,
    * ítems y mediciones por separado desde el cliente. */
-  const { datos, cargando, error } = useCertificacionItems(obraId);
+  const { datos, cargando, error, recargar: recargarItems } = useCertificacionItems(obraId);
 
   /* El hook de certificaciones vive acá y no dentro de cada vista: así lo que
    * se guarda en Registrar aparece en Histórico sin volver a pedirlo. */
@@ -1376,6 +1473,7 @@ export default function CertificacionPage() {
                 calcularPrevisto={certificaciones.calcularPrevisto}
                 crearCertificacion={certificaciones.crearCertificacion}
                 conversiones={conversiones}
+                recargarItems={recargarItems}
               />
             )}
 

@@ -141,6 +141,17 @@ export async function PUT(
 
     if (errorBorrarInsumos) throw errorBorrarInsumos;
 
+    // Si la tabla todavía no existe (falta la migración 012), no hay nada que
+    // borrar: se ignora ese error puntual y la edición sigue.
+    const { error: errorBorrarMediciones } = await supabase
+      .from("certificacion_mediciones")
+      .delete()
+      .eq("certificacion_id", params.id);
+
+    if (errorBorrarMediciones && errorBorrarMediciones.code !== "42P01") {
+      throw errorBorrarMediciones;
+    }
+
     const errorHijos = await insertarHijosCertificacion(
       supabase,
       params.id,

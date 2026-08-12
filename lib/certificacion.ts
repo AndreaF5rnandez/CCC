@@ -374,9 +374,31 @@ export function validarPayloadCertificacion(
     }
     itemsVistos.add(itemId);
 
+    // Mediciones ejecutadas (opcional): solo se guardan, no entran al cálculo.
+    let medicionIds: string[] | undefined;
+    if (crudo && crudo.medicion_ids !== undefined) {
+      if (!Array.isArray(crudo.medicion_ids)) {
+        return { ok: false, error: `Las mediciones del ítem ${itemId} tienen que ser una lista` };
+      }
+      const vistas = new Set<string>();
+      for (const medicionId of crudo.medicion_ids) {
+        if (typeof medicionId !== "string" || medicionId.trim() === "") {
+          return { ok: false, error: `El ítem ${itemId} tiene una medición sin id` };
+        }
+        if (vistas.has(medicionId)) {
+          return {
+            ok: false,
+            error: `La medición ${medicionId} está repetida en el ítem ${itemId}`,
+          };
+        }
+        vistas.add(medicionId);
+      }
+      medicionIds = Array.from(vistas);
+    }
+
     const cruda = crudo?.cantidad_ejecutada;
     if (cruda === undefined || cruda === null) {
-      items.push({ item_id: itemId });
+      items.push({ item_id: itemId, medicion_ids: medicionIds });
       continue;
     }
 
@@ -387,7 +409,7 @@ export function validarPayloadCertificacion(
         error: `La cantidad ejecutada del ítem ${itemId} tiene que ser un número mayor o igual a 0`,
       };
     }
-    items.push({ item_id: itemId, cantidad_ejecutada: cantidad });
+    items.push({ item_id: itemId, cantidad_ejecutada: cantidad, medicion_ids: medicionIds });
   }
 
   // ── Material real consumido ───────────────────────────────────────
@@ -477,6 +499,9 @@ const CERTIFICACION_SELECT_BASE = (conCantidad: boolean) => `
 // request; se resetea solo al reiniciar el server, que es cuando corresponde
 // después de aplicar la migración.
 let faltaCantidadEjecutada = false;
+
+// Ídem para la tabla certificacion_mediciones (migración 012).
+let faltaTablaMediciones = false;
 
 /**
  * Trae certificaciones con su detalle y su desvío ya calculado.
@@ -660,6 +685,35 @@ export async function insertarHijosCertificacion(
       );
 
     if (errorInsumos) return errorInsumos.message;
+  }
+
+  // Qué mediciones se ejecutaron. No entra en el cálculo del desvío (para eso
+  // está cantidad_ejecutada): sirve para no volver a ofrecer una pared ya
+  // certificada.
+  const filasMediciones = items.flatMap((item) =>
+    (item.medicion_ids ?? []).map((medicion_id) => ({
+      certificacion_id: certificacionId,
+      medicion_id,
+    })),
+  );
+
+  if (filasMediciones.length > 0 && !faltaTablaMediciones) {
+    const { error: errorMediciones } = await supabase
+      .from("certificacion_mediciones")
+      .insert(filasMediciones);
+
+    // 42P01 = falta correr la migración 012. La certificación se guarda igual
+    // (el desvío no depende de esto); lo único que se pierde es el marcado de
+    // mediciones ya certificadas.
+    if (errorMediciones) {
+      if (errorMediciones.code !== "42P01") return errorMediciones.message;
+      faltaTablaMediciones = true;
+      console.warn(
+        "[certificacion] Falta la tabla certificacion_mediciones: ejecutá " +
+          "supabase/migrations/012_certificacion_mediciones.sql. " +
+          "Las certificaciones se guardan, pero no marcan las mediciones ya ejecutadas.",
+      );
+    }
   }
 
   return null;

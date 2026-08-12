@@ -21,6 +21,7 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 | `certificaciones` | id, obra_id, fecha, descripcion? — CASCADE al eliminar obra |
 | `certificacion_items` | id, certificacion_id, item_id, cantidad_ejecutada? (NULL = ítem completo) — UNIQUE (certificacion_id, item_id) |
 | `certificacion_insumos` | id, certificacion_id, insumo_id, cantidad_real — UNIQUE (certificacion_id, insumo_id) |
+| `certificacion_mediciones` | id, certificacion_id, medicion_id — qué mediciones se ejecutaron; UNIQUE (certificacion_id, medicion_id) |
 
 **Reglas críticas de DB:**
 - `cantidad_calculada` = `n × COALESCE(largo,1) × COALESCE(ancho,1) × COALESCE(alto,1)` — GENERATED ALWAYS, nunca enviarlo desde backend
@@ -47,6 +48,8 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 - `GET /api/presupuesto/[obraId]` — `?gastos_generales=10&beneficio=15&impuestos=21`
 - `POST /api/certificacion-previsto` — material previsto para un set de ítems ejecutados;
   body `{ obra_id, items: [{ item_id, cantidad_ejecutada? }] }`. NO usa la planificación mensual.
+- `GET /api/certificacion-items` — requiere `?obra_id=uuid`; árbol rubro→ítem→mediciones
+  + qué mediciones ya se certificaron
 - `GET/POST /api/certificaciones` — GET requiere `?obra_id=uuid`; trae el desvío calculado
 - `GET/PUT/DELETE /api/certificaciones/[id]` — PUT reemplaza ítems e insumos enteros
 

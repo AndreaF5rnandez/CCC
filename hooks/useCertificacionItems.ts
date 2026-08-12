@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { CertificacionItemsResponse } from '@/types';
 
 /**
@@ -39,7 +39,20 @@ export function useCertificacionItems(obraId: string) {
     };
   }, [obraId]);
 
-  return { datos, cargando, error };
+  /* Se llama después de guardar una certificación: sin esto, las mediciones
+   * recién certificadas seguirían apareciendo disponibles hasta recargar. */
+  const recargar = useCallback(async () => {
+    const res = await fetch(`/api/certificacion-items?obra_id=${obraId}`);
+    const json: unknown = await res.json();
+    if (!res.ok) {
+      throw new Error(
+        (json as { error?: string }).error ?? 'Error al recargar los ítems de la obra',
+      );
+    }
+    setDatos(json as CertificacionItemsResponse);
+  }, [obraId]);
+
+  return { datos, cargando, error, recargar };
 }
 
 export default useCertificacionItems;
