@@ -1,9 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useRubros } from '@/hooks/useRubros';
+import { ObraTabs } from '@/components/obras/ObraTabs';
 import { useItems } from '@/hooks/useItems';
 import { useMediciones } from '@/hooks/useMediciones';
 import { useRecetas } from '@/hooks/useRecetas';
@@ -722,43 +722,7 @@ export default function MedicionPage() {
       style={{ backgroundColor: '#D5D4DC', background: MESH_GRADIENT }}
     >
       {/* ── Barra superior ── */}
-      <header
-        className="shrink-0 z-10 px-6 flex items-stretch gap-4"
-        style={{
-          height: '48px',
-          background: 'rgba(255, 255, 255, 0.80)',
-          backdropFilter: 'blur(20px)',
-          WebkitBackdropFilter: 'blur(20px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.50)',
-        }}
-      >
-        <span className="font-semibold text-sm truncate flex-1 flex items-center" style={{ color: '#1A1A2E' }}>
-          {obraNombre || '…'}
-        </span>
-        <nav className="flex h-full">
-          <Link
-            href={`/obras/${obraId}/medicion`}
-            className="px-5 flex items-center text-sm font-semibold border-b-2"
-            style={{ borderColor: '#1A1A2E', color: '#1A1A2E' }}
-          >
-            Cómputo
-          </Link>
-          <Link
-            href={`/obras/${obraId}/presupuesto`}
-            className="px-5 flex items-center text-sm font-medium border-b-2 border-transparent transition-colors"
-            style={{ color: '#6B7080' }}
-          >
-            Presupuesto
-          </Link>
-          <Link
-            href={`/obras/${obraId}/planificacion`}
-            className="px-5 flex items-center text-sm font-medium border-b-2 border-transparent transition-colors"
-            style={{ color: '#6B7080' }}
-          >
-            Planificación
-          </Link>
-        </nav>
-      </header>
+      <ObraTabs obraId={obraId} activa="medicion" obraNombre={obraNombre} />
 
       {/* ── Dos paneles ── */}
       <div className="flex flex-1 min-h-0">

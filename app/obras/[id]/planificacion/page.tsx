@@ -1,9 +1,9 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { usePlanificacion } from '@/hooks/usePlanificacion';
+import { ObraTabs } from '@/components/obras/ObraTabs';
 import { useExplosionInsumos } from '@/hooks/useExplosionInsumos';
 import { convertirAUnidadCompra } from '@/lib/calculos';
 import type { PlanificacionResponse, ExplosionInsumo } from '@/types';
@@ -1833,43 +1833,7 @@ export default function PlanificacionPage() {
       style={{ backgroundColor: '#D5D4DC', background: MESH_GRADIENT }}
     >
       {/* ── Header con tabs ── */}
-      <header
-        className="shrink-0 z-10 px-6 flex items-stretch gap-4"
-        style={{
-          height: '48px',
-          background: 'rgba(255, 255, 255, 0.80)',
-          backdropFilter: 'blur(20px)',
-          WebkitBackdropFilter: 'blur(20px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.50)',
-        }}
-      >
-        <span className="font-semibold text-sm truncate flex-1 flex items-center" style={{ color: '#1A1A2E' }}>
-          {obraNombre}
-        </span>
-        <nav className="flex h-full">
-          <Link
-            href={`/obras/${obraId}/medicion`}
-            className="px-5 flex items-center text-sm font-medium border-b-2 border-transparent transition-colors"
-            style={{ color: '#6B7080' }}
-          >
-            Cómputo
-          </Link>
-          <Link
-            href={`/obras/${obraId}/presupuesto`}
-            className="px-5 flex items-center text-sm font-medium border-b-2 border-transparent transition-colors"
-            style={{ color: '#6B7080' }}
-          >
-            Presupuesto
-          </Link>
-          <Link
-            href={`/obras/${obraId}/planificacion`}
-            className="px-5 flex items-center text-sm font-semibold border-b-2"
-            style={{ borderColor: '#1A1A2E', color: '#1A1A2E' }}
-          >
-            Planificación
-          </Link>
-        </nav>
-      </header>
+      <ObraTabs obraId={obraId} activa="planificacion" obraNombre={obraNombre} />
 
       {/* ── Contenido ── */}
       <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4">
