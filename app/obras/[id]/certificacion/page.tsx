@@ -3,17 +3,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { ObraTabs } from '@/components/obras/ObraTabs';
-import { usePlanificacion } from '@/hooks/usePlanificacion';
+import { useCertificacionItems } from '@/hooks/useCertificacionItems';
 import { useCertificaciones } from '@/hooks/useCertificaciones';
 import { useConversionesCompra } from '@/hooks/useConversionesCompra';
 import { useInsumos } from '@/hooks/useInsumos';
+import {
+  SELECCION_VACIA,
+  alternarItemEn,
+  alternarMedicionEn,
+  alternarRubroEn,
+  cantidadEjecutada,
+  estadoDelItem,
+  estadoDelRubro,
+  itemsEjecutados,
+  type EstadoTilde,
+  type Seleccion,
+} from '@/lib/certificacionSeleccion';
 import type {
   CertificacionConDesvio,
   CertificacionDesvioInsumo,
   CertificacionInsumoPrevisto,
+  CertificacionItemDisponible,
+  CertificacionItemsResponse,
+  CertificacionMedicion,
+  CertificacionRubroDisponible,
   Insumo,
   InsumoCompraObraResponse,
-  PlanificacionResponse,
 } from '@/types';
 
 type CertificacionesHook = ReturnType<typeof useCertificaciones>;
@@ -122,6 +137,45 @@ function parsearCantidad(texto: string): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+/* ─── Selección a nivel medición ────────────────────────────────────────────── */
+
+/** Checkbox de tres estados. El parcial no se puede poner por atributo: hay que
+ *  escribir `indeterminate` sobre el nodo. */
+function CheckTriestado({
+  estado,
+  onChange,
+  className,
+}: {
+  estado: EstadoTilde;
+  onChange: () => void;
+  className?: string;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = estado === 'algunas';
+  }, [estado]);
+
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={estado === 'todas'}
+      onChange={onChange}
+      className={className ?? 'w-4 h-4 cursor-pointer shrink-0'}
+      style={{ accentColor: ACENTO }}
+    />
+  );
+}
+
+/** Dimensiones de una medición como en el cómputo: 3 · 3,50 · 2,60. */
+function dimensiones(m: CertificacionMedicion): string {
+  const partes = [m.n, m.largo, m.ancho, m.alto]
+    .filter((v): v is number => typeof v === 'number')
+    .map((v) => new Intl.NumberFormat('es-AR', { maximumFractionDigits: 2 }).format(v));
+  return partes.length > 1 ? partes.join(' · ') : '';
+}
+
 /* ─── Vista: Registrar ─────────────────────────────────────────────────────── */
 
 function VistaRegistrar({
@@ -130,7 +184,7 @@ function VistaRegistrar({
   crearCertificacion,
   conversiones,
 }: {
-  datos: PlanificacionResponse;
+  datos: CertificacionItemsResponse;
   calcularPrevisto: CertificacionesHook['calcularPrevisto'];
   crearCertificacion: CertificacionesHook['crearCertificacion'];
   conversiones: Map<string, InsumoCompraObraResponse>;
@@ -140,7 +194,8 @@ function VistaRegistrar({
 
   const [fecha, setFecha] = useState(hoyISO());
   const [descripcion, setDescripcion] = useState('');
-  const [tildados, setTildados] = useState<Set<string>>(new Set());
+  const [seleccion, setSeleccion] = useState<Seleccion>(SELECCION_VACIA);
+  const [expandidos, setExpandidos] = useState<Set<string>>(new Set());
 
   const [previstos, setPrevistos] = useState<CertificacionInsumoPrevisto[]>([]);
   const [calculando, setCalculando] = useState(false);
@@ -157,8 +212,29 @@ function VistaRegistrar({
   const [errorGuardar, setErrorGuardar] = useState<string | null>(null);
   const [exito, setExito] = useState<string | null>(null);
 
-  const itemIds = useMemo(() => Array.from(tildados), [tildados]);
-  const claveSeleccion = useMemo(() => itemIds.slice().sort().join(','), [itemIds]);
+  /* Lo que se le manda al endpoint de previsto: por cada ítem con algo tildado,
+   * la SUMA de las mediciones seleccionadas. El backend ya sabe calcular el
+   * previsto proporcional a esa cantidad; acá no se recalcula nada. */
+  const ejecutados = useMemo(
+    () => itemsEjecutados(datos.rubros, seleccion),
+    [datos.rubros, seleccion],
+  );
+
+  const itemIds = useMemo(() => ejecutados.map((e) => e.item_id), [ejecutados]);
+
+  /* Identidad estable de la selección: cambia si cambia qué ítems entran o
+   * cuánto se ejecutó de cada uno, no por una referencia de array nueva. */
+  const claveSeleccion = useMemo(
+    () =>
+      ejecutados
+        .map((e) => `${e.item_id}:${e.cantidad_ejecutada ?? 'total'}`)
+        .sort()
+        .join(','),
+    [ejecutados],
+  );
+
+  const totalMedicionesTildadas =
+    seleccion.mediciones.size + seleccion.itemsSinMedicion.size;
 
   /* El previsto se recalcula cada vez que cambia la selección. La request
    * anterior se aborta para que dos clicks rápidos no dejen pisado el
@@ -180,10 +256,7 @@ function VistaRegistrar({
     setCalculando(true);
     setErrorPrevisto(null);
 
-    calcularPrevisto(
-      itemIds.map((item_id) => ({ item_id })),
-      controller.signal,
-    )
+    calcularPrevisto(ejecutados, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         // Solo materiales en pantalla; el backend manda los tres tipos.
@@ -204,26 +277,29 @@ function VistaRegistrar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [claveSeleccion, calcularPrevisto]);
 
-  const alternarItem = useCallback((itemId: string) => {
-    setTildados((prev) => {
+  const alternarMedicion = useCallback((medicionId: string) => {
+    setSeleccion((prev) => alternarMedicionEn(medicionId, prev));
+    setExito(null);
+  }, []);
+
+  /** El checkbox del ítem tilda o destilda todas sus mediciones de una. */
+  const alternarItem = useCallback((item: CertificacionItemDisponible) => {
+    setSeleccion((prev) => alternarItemEn(item, prev));
+    setExito(null);
+  }, []);
+
+  const alternarRubro = useCallback((rubro: CertificacionRubroDisponible) => {
+    setSeleccion((prev) => alternarRubroEn(rubro, prev));
+    setExito(null);
+  }, []);
+
+  const alternarExpandido = useCallback((itemId: string) => {
+    setExpandidos((prev) => {
       const siguiente = new Set(prev);
       if (siguiente.has(itemId)) siguiente.delete(itemId);
       else siguiente.add(itemId);
       return siguiente;
     });
-    setExito(null);
-  }, []);
-
-  const alternarRubro = useCallback((itemsDelRubro: string[], todosTildados: boolean) => {
-    setTildados((prev) => {
-      const siguiente = new Set(prev);
-      for (const id of itemsDelRubro) {
-        if (todosTildados) siguiente.delete(id);
-        else siguiente.add(id);
-      }
-      return siguiente;
-    });
-    setExito(null);
   }, []);
 
   /* Filas de material a mostrar: las previstas más las agregadas a mano que no
@@ -274,7 +350,8 @@ function VistaRegistrar({
   }, [materiales, insumoAAgregar]);
 
   const limpiar = useCallback(() => {
-    setTildados(new Set());
+    setSeleccion(SELECCION_VACIA);
+    setExpandidos(new Set());
     setReales({});
     setExtras([]);
     setDescripcion('');
@@ -285,8 +362,8 @@ function VistaRegistrar({
     setErrorGuardar(null);
     setExito(null);
 
-    if (itemIds.length === 0) {
-      setErrorGuardar('Tildá al menos un ítem ejecutado.');
+    if (ejecutados.length === 0) {
+      setErrorGuardar('Tildá al menos una medición ejecutada.');
       return;
     }
 
@@ -312,10 +389,14 @@ function VistaRegistrar({
 
     setGuardando(true);
     try {
+      /* Se guarda la cantidad ejecutada por ítem (la suma de sus mediciones
+       * tildadas) en certificacion_items.cantidad_ejecutada. Es lo que hace
+       * que el desvío del histórico se calcule sobre las paredes que se
+       * hicieron y no sobre el ítem entero. */
       await crearCertificacion({
         fecha,
         descripcion: descripcion.trim() === '' ? null : descripcion.trim(),
-        items: itemIds.map((item_id) => ({ item_id })),
+        items: ejecutados,
         insumos,
       });
       limpiar();
@@ -325,7 +406,7 @@ function VistaRegistrar({
     } finally {
       setGuardando(false);
     }
-  }, [itemIds, filasMaterial, reales, fecha, descripcion, crearCertificacion, limpiar]);
+  }, [ejecutados, filasMaterial, reales, fecha, descripcion, crearCertificacion, limpiar]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -380,9 +461,11 @@ function VistaRegistrar({
             Ítems ejecutados
           </h3>
           <span className="text-sm" style={{ color: TEXTO_2 }}>
-            {tildados.size === 0
-              ? 'Ninguno tildado'
-              : `${tildados.size} ${tildados.size === 1 ? 'ítem tildado' : 'ítems tildados'}`}
+            {totalMedicionesTildadas === 0
+              ? 'Nada tildado'
+              : `${totalMedicionesTildadas} ${
+                  totalMedicionesTildadas === 1 ? 'medición tildada' : 'mediciones tildadas'
+                } en ${itemIds.length} ${itemIds.length === 1 ? 'ítem' : 'ítems'}`}
           </span>
         </div>
 
@@ -394,9 +477,7 @@ function VistaRegistrar({
 
         <div className="flex flex-col gap-5">
           {datos.rubros.map((rubro) => {
-            const idsDelRubro = rubro.items.map((i) => i.item_id);
-            const todosTildados =
-              idsDelRubro.length > 0 && idsDelRubro.every((id) => tildados.has(id));
+            const estadoRubro: EstadoTilde = estadoDelRubro(rubro, seleccion);
 
             return (
               <div key={rubro.rubro_id}>
@@ -404,44 +485,136 @@ function VistaRegistrar({
                   className="flex items-center gap-2 pb-1.5 mb-1"
                   style={{ borderBottom: BORDE_SUTIL }}
                 >
-                  <input
-                    type="checkbox"
-                    checked={todosTildados}
-                    onChange={() => alternarRubro(idsDelRubro, todosTildados)}
+                  <CheckTriestado
+                    estado={estadoRubro}
+                    onChange={() => alternarRubro(rubro)}
                     className="w-4 h-4 cursor-pointer"
-                    style={{ accentColor: ACENTO }}
                   />
                   <span className="text-sm font-semibold" style={{ color: TEXTO }}>
                     {rubro.rubro_nombre}
                   </span>
                 </div>
 
-                {rubro.items.map((item) => (
-                  <label
-                    key={item.item_id}
-                    className="flex items-center gap-3 py-2 px-1 cursor-pointer rounded-lg transition-colors hover:bg-black/[0.02]"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={tildados.has(item.item_id)}
-                      onChange={() => alternarItem(item.item_id)}
-                      className="w-4 h-4 cursor-pointer shrink-0"
-                      style={{ accentColor: ACENTO }}
-                    />
-                    <span className="text-sm flex-1 truncate" style={{ color: TEXTO }}>
-                      {item.descripcion}
-                    </span>
-                    <span className="text-sm tabular-nums" style={{ color: TEXTO_2 }}>
-                      {formatNum(item.cantidad_total, item.unidad_medida)}
-                    </span>
-                    <span
-                      className="text-xs w-10 text-left shrink-0"
-                      style={{ color: TEXTO_3 }}
-                    >
-                      {item.unidad_medida}
-                    </span>
-                  </label>
-                ))}
+                {rubro.items.map((item) => {
+                  const estado = estadoDelItem(item, seleccion);
+                  const abierto = expandidos.has(item.item_id);
+                  // Un ítem con una sola medición (o ninguna) no necesita
+                  // desplegarse: tildarlo ya es toda la decisión.
+                  const desplegable = item.mediciones.length > 1;
+                  const ejecutado = cantidadEjecutada(item, seleccion);
+
+                  return (
+                    <div key={item.item_id}>
+                      <div className="flex items-center gap-3 py-2 px-1 rounded-lg transition-colors hover:bg-black/[0.02]">
+                        <CheckTriestado
+                          estado={estado}
+                          onChange={() => alternarItem(item)}
+                        />
+
+                        {desplegable ? (
+                          <button
+                            onClick={() => alternarExpandido(item.item_id)}
+                            className="flex items-center gap-2 flex-1 min-w-0 text-left"
+                          >
+                            <span
+                              className="text-[10px] shrink-0"
+                              style={{
+                                color: TEXTO_3,
+                                display: 'inline-block',
+                                transform: abierto ? 'rotate(90deg)' : 'none',
+                              }}
+                            >
+                              ▶
+                            </span>
+                            <span className="text-sm truncate" style={{ color: TEXTO }}>
+                              {item.descripcion}
+                            </span>
+                            <span className="text-xs shrink-0" style={{ color: TEXTO_3 }}>
+                              {item.mediciones.length} mediciones
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="text-sm flex-1 truncate pl-4" style={{ color: TEXTO }}>
+                            {item.descripcion}
+                          </span>
+                        )}
+
+                        {/* Con selección parcial se muestra lo ejecutado sobre
+                            el total, para no perder de vista la proporción. */}
+                        <span className="text-sm tabular-nums" style={{ color: TEXTO_2 }}>
+                          {estado === 'algunas' ? (
+                            <>
+                              <span style={{ color: ACENTO_TEXTO, fontWeight: 600 }}>
+                                {formatNum(ejecutado, item.unidad_medida)}
+                              </span>
+                              <span style={{ color: TEXTO_3 }}>
+                                {' / '}
+                                {formatNum(item.cantidad_total, item.unidad_medida)}
+                              </span>
+                            </>
+                          ) : (
+                            formatNum(item.cantidad_total, item.unidad_medida)
+                          )}
+                        </span>
+                        <span
+                          className="text-xs w-10 text-left shrink-0"
+                          style={{ color: TEXTO_3 }}
+                        >
+                          {item.unidad_medida}
+                        </span>
+                      </div>
+
+                      {/* Mediciones del ítem */}
+                      {desplegable && abierto && (
+                        <div
+                          className="ml-7 pl-3 mb-1"
+                          style={{ borderLeft: '2px solid rgba(0, 0, 0, 0.06)' }}
+                        >
+                          {item.mediciones.map((m) => {
+                            const dims = dimensiones(m);
+                            return (
+                              <label
+                                key={m.id}
+                                className="flex items-center gap-3 py-1.5 px-1 cursor-pointer rounded-lg transition-colors hover:bg-black/[0.02]"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={seleccion.mediciones.has(m.id)}
+                                  onChange={() => alternarMedicion(m.id)}
+                                  className="w-4 h-4 cursor-pointer shrink-0"
+                                  style={{ accentColor: ACENTO }}
+                                />
+                                <span
+                                  className="text-sm flex-1 truncate"
+                                  style={{ color: TEXTO_2 }}
+                                >
+                                  {m.descripcion}
+                                </span>
+                                {dims && (
+                                  <span
+                                    className="text-xs tabular-nums shrink-0"
+                                    style={{ color: TEXTO_3 }}
+                                  >
+                                    {dims}
+                                  </span>
+                                )}
+                                <span
+                                  className="text-sm tabular-nums shrink-0"
+                                  style={{ color: TEXTO_2 }}
+                                >
+                                  {formatNum(m.cantidad_calculada, item.unidad_medida)}
+                                </span>
+                                <span className="text-xs w-10 shrink-0" style={{ color: TEXTO_3 }}>
+                                  {item.unidad_medida}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
@@ -692,7 +865,7 @@ function VistaRegistrar({
           </button>
           <button
             onClick={guardar}
-            disabled={guardando || tildados.size === 0}
+            disabled={guardando || ejecutados.length === 0}
             className="text-sm font-semibold transition-colors disabled:opacity-40"
             style={{
               padding: '10px 24px',
@@ -1136,7 +1309,7 @@ export default function CertificacionPage() {
    * planificación, con exactamente la forma que necesita el checklist (y de ahí
    * sale también el nombre de la obra). Se reutiliza en vez de pedir rubros,
    * ítems y mediciones por separado desde el cliente. */
-  const { datos, cargando, error } = usePlanificacion(obraId);
+  const { datos, cargando, error } = useCertificacionItems(obraId);
 
   /* El hook de certificaciones vive acá y no dentro de cada vista: así lo que
    * se guarda en Registrar aparece en Histórico sin volver a pedirlo. */

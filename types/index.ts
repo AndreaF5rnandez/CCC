@@ -363,6 +363,38 @@ export interface CertificacionPrevistoResponse {
   insumos: CertificacionInsumoPrevisto[];
 }
 
+/* ─── Certificación: árbol de selección (rubro → ítem → mediciones) ────────── */
+
+/** Una medición como la ve el selector de certificación: lo justo para que el
+ *  encargado la reconozca ("Pared 5", 3,50 × 2,60). */
+export type CertificacionMedicion = Pick<
+  Medicion,
+  'id' | 'descripcion' | 'n' | 'largo' | 'ancho' | 'alto' | 'cantidad_calculada'
+>;
+
+export interface CertificacionItemDisponible {
+  item_id: string;
+  descripcion: string;
+  unidad_medida: string;
+  // Suma de las cantidades de sus mediciones.
+  cantidad_total: number;
+  mediciones: CertificacionMedicion[];
+}
+
+export interface CertificacionRubroDisponible {
+  rubro_id: string;
+  rubro_nombre: string;
+  items: CertificacionItemDisponible[];
+}
+
+/** Respuesta de GET /api/certificacion-items?obra_id=.
+ *  Es el árbol que se tilda en la vista de Registrar. */
+export interface CertificacionItemsResponse {
+  obra_id: string;
+  obra_nombre: string;
+  rubros: CertificacionRubroDisponible[];
+}
+
 /* ─── Certificación: registro guardado y desvío ────────────────────────────── */
 
 /** Fila de `certificaciones`. */
