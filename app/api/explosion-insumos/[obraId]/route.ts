@@ -6,12 +6,12 @@ import {
   metadatosInsumo,
   resolverCompra,
 } from "@/lib/calculos";
+import { cargarOverridesCompra } from "@/lib/compra";
 import { loguearError } from "@/lib/apiError";
 import type {
   Rubro,
   Item,
   Insumo,
-  InsumoCompraObra,
   InsumoConsumoBase,
   RecetaConInsumos,
   Planificacion,
@@ -28,11 +28,6 @@ type ItemExplosion = Item & {
   planificacion: PlanificacionResumen[];
 };
 type RubroExplosion = Rubro & { items: ItemExplosion[] };
-
-type OverrideCompra = Pick<
-  InsumoCompraObra,
-  "insumo_id" | "factor_compra" | "unidad_compra"
->;
 
 // Acumulador interno por insumo: metadatos + vector de consumo por mes.
 type AcumInsumo = InsumoConsumoBase & {
@@ -106,27 +101,12 @@ export async function GET(
     const rubros = (rubrosData ?? []) as RubroExplosion[];
 
     // Overrides de compra de ESTA obra. Pisan la referencia del insumo sin
-    // afectar a las demás obras; se resuelven al armar la respuesta.
-    const { data: overridesData, error: overridesError } = await supabase
-      .from("insumo_compra_obra")
-      .select("insumo_id, factor_compra, unidad_compra")
-      .eq("obra_id", params.obraId);
-
-    // 42P01 = la tabla todavía no existe: la migración 009 se aplica a mano en
-    // Supabase y puede ir por detrás del deploy. En ese caso la explosión sigue
-    // funcionando sin conversión de compra en vez de romper entera; cualquier
-    // otro error sí es un error de verdad.
-    if (overridesError && overridesError.code !== "42P01") throw overridesError;
-    if (overridesError) {
-      console.warn(
-        "[GET /api/explosion-insumos/[obraId]] Falta la tabla insumo_compra_obra: " +
-          "ejecutá supabase/migrations/009_unidad_compra.sql. " +
-          "La explosión se muestra sin conversión a unidad de compra.",
-      );
-    }
-
-    const overridePorInsumo = new Map<string, OverrideCompra>(
-      ((overridesData ?? []) as OverrideCompra[]).map((o) => [o.insumo_id, o]),
+    // afectar a las demás obras; se resuelven al armar la respuesta. Es el
+    // mismo loader que usa la certificación, para que el factor coincida.
+    const overridePorInsumo = await cargarOverridesCompra(
+      supabase,
+      params.obraId,
+      "GET /api/explosion-insumos/[obraId]",
     );
 
     // Meses de la grilla: 1..plazo_meses. Los porcentajes cargados en meses

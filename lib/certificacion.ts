@@ -5,7 +5,9 @@ import {
   calcularCantidadTotalItem,
   calcularConsumoIngredientes,
   metadatosInsumo,
+  resolverCompra,
 } from "./calculos";
+import { cargarOverridesCompra, type OverrideCompra } from "./compra";
 import type {
   Insumo,
   Item,
@@ -98,11 +100,14 @@ export async function cargarItemsParaPrevisto(
  *
  * @param pedidos Ítems ejecutados; sin `cantidad_ejecutada` se toma el completo.
  * @param itemsPorId Ítems ya cargados con `cargarItemsParaPrevisto`.
+ * @param overrides Overrides de compra de la obra, para resolver el factor con
+ *   la misma precedencia que la explosión. Sin overrides vale la referencia.
  * @returns Detalle por ítem, insumos agrupados, y los ids que no se encontraron.
  */
 export function calcularPrevistoConItems(
   pedidos: CertificacionItemEjecutado[],
   itemsPorId: Map<string, ItemParaPrevisto>,
+  overrides: Map<string, OverrideCompra> = new Map(),
 ): {
   items: CertificacionItemPrevisto[];
   insumos: CertificacionInsumoPrevisto[];
@@ -158,6 +163,8 @@ export function calcularPrevistoConItems(
         porInsumo.set(insumo.id, {
           ...metadatosInsumo(insumo),
           cantidad_prevista: cantidad,
+          // Misma resolución referencia/override que la explosión.
+          ...resolverCompra(insumo, overrides.get(insumo.id) ?? null),
         });
       }
     }
@@ -199,12 +206,19 @@ export function ordenarPorTipoYNombre(
  * solo de materiales, pero el filtro lo hace la vista: descartar acá obligaría
  * a tocar el backend el día que se sume mano de obra.
  *
- * @param previstos Insumos previstos, ya agrupados.
- * @param reales Insumos realmente consumidos, con el insumo cargado.
+ * Todo se compara en unidad BASE: `cantidad_real` se guarda en unidad base
+ * justamente para que el cruce no dependa de en qué unidad se cargó. La
+ * conversión a unidad de compra viaja resuelta para que la vista la muestre.
+ *
+ * @param previstos Insumos previstos, ya agrupados y con la compra resuelta.
+ * @param reales Insumos realmente consumidos (unidad base), con el insumo cargado.
+ * @param overrides Overrides de compra de la obra, para los insumos que tienen
+ *   real y no previsto (no vienen con la compra ya resuelta).
  */
 export function calcularDesvio(
   previstos: CertificacionInsumoPrevisto[],
   reales: Array<{ insumo: Insumo; cantidad_real: number }>,
+  overrides: Map<string, OverrideCompra> = new Map(),
 ): CertificacionDesvioInsumo[] {
   const porInsumo = new Map<string, CertificacionDesvioInsumo>();
 
@@ -215,6 +229,10 @@ export function calcularDesvio(
       unidad_medida: previsto.unidad_medida,
       tipo: previsto.tipo,
       precio_unitario: previsto.precio_unitario,
+      unidad_compra: previsto.unidad_compra,
+      factor_compra: previsto.factor_compra,
+      factor_origen: previsto.factor_origen,
+      factor_referencia: previsto.factor_referencia,
       cantidad_prevista: previsto.cantidad_prevista,
       cantidad_real: 0,
       desvio_cantidad: 0,
@@ -232,6 +250,7 @@ export function calcularDesvio(
     } else {
       porInsumo.set(insumo.id, {
         ...metadatosInsumo(insumo),
+        ...resolverCompra(insumo, overrides.get(insumo.id) ?? null),
         cantidad_prevista: 0,
         cantidad_real: cantidadReal,
         desvio_cantidad: 0,
@@ -520,15 +539,22 @@ export async function cargarCertificacionesConDesvio(
   }
 
   const itemsPorObra = new Map<string, Map<string, ItemParaPrevisto>>();
+  const overridesPorObra = new Map<string, Map<string, OverrideCompra>>();
   for (const [obraId, ids] of itemIdsPorObra) {
     itemsPorObra.set(
       obraId,
       await cargarItemsParaPrevisto(supabase, obraId, Array.from(ids)),
     );
+    // Mismo factor que usa la explosión: override de la obra sobre referencia.
+    overridesPorObra.set(
+      obraId,
+      await cargarOverridesCompra(supabase, obraId, "certificacion"),
+    );
   }
 
   return certificaciones.map((cert) => {
     const itemsPorId = itemsPorObra.get(cert.obra_id) ?? new Map();
+    const overrides = overridesPorObra.get(cert.obra_id) ?? new Map();
 
     const pedidos: CertificacionItemEjecutado[] = cert.items.map((it) => ({
       item_id: it.item_id,
@@ -539,7 +565,7 @@ export async function cargarCertificacionesConDesvio(
     // Acá los faltantes se ignoran a propósito: al leer lo ya guardado, un
     // ítem que no resuelve no es culpa de quien consulta. Al guardar sí es
     // error, y eso lo valida el route handler.
-    const previsto = calcularPrevistoConItems(pedidos, itemsPorId);
+    const previsto = calcularPrevistoConItems(pedidos, itemsPorId, overrides);
 
     // Un insumo borrado deja la fila huérfana sin poder resolverse: se saltea
     // en vez de romper la lectura de toda la certificación.
@@ -560,6 +586,7 @@ export async function cargarCertificacionesConDesvio(
         insumo: fila.insumo,
         cantidad_real: Number(fila.cantidad_real),
       })),
+      overrides,
     );
 
     return {

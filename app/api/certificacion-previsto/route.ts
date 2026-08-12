@@ -4,6 +4,7 @@ import {
   cargarItemsParaPrevisto,
   calcularPrevistoConItems,
 } from "@/lib/certificacion";
+import { cargarOverridesCompra } from "@/lib/compra";
 import { loguearError } from "@/lib/apiError";
 import type {
   CertificacionItemEjecutado,
@@ -118,7 +119,15 @@ export async function POST(request: NextRequest) {
       pedidos.map((p) => p.item_id),
     );
 
-    const previsto = calcularPrevistoConItems(pedidos, itemsPorId);
+    // Mismo factor de compra que la explosión: override de la obra sobre la
+    // referencia del insumo. La vista carga el real en unidad de compra.
+    const overrides = await cargarOverridesCompra(
+      supabase,
+      obra_id,
+      "POST /api/certificacion-previsto",
+    );
+
+    const previsto = calcularPrevistoConItems(pedidos, itemsPorId, overrides);
 
     // Un item_id que no aparece es un error del que llama (ítem inexistente o
     // de otra obra), no un ítem que "no aporta nada": se avisa, no se ignora.

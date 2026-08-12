@@ -1,8 +1,61 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
 import { resolverCompra } from "@/lib/calculos";
+import { cargarOverridesCompra } from "@/lib/compra";
 import { loguearError } from "@/lib/apiError";
 import type { InsumoCompraObraResponse } from "@/types";
+
+/**
+ * GET /api/insumo-compra-obra?obra_id=uuid
+ *
+ * Conversión a unidad de compra ya resuelta (override de la obra sobre
+ * referencia del insumo) para TODOS los insumos del usuario.
+ *
+ * Lo usa la certificación para los materiales que el encargado agrega a mano:
+ * esos no salen de ninguna receta, así que no vienen en la respuesta del
+ * previsto, y sin esto se cargarían con la referencia del insumo ignorando el
+ * override de la obra. Devuelve solo los que tienen conversión definida.
+ */
+export async function GET(request: NextRequest) {
+  try {
+    const supabase = createSupabaseServerClient();
+    const { searchParams } = new URL(request.url);
+    const obra_id = searchParams.get("obra_id");
+
+    if (!obra_id) {
+      return NextResponse.json(
+        { error: "El parámetro obra_id es obligatorio" },
+        { status: 400 },
+      );
+    }
+
+    const { data: insumos, error: insumosError } = await supabase
+      .from("insumos")
+      .select("id, unidad_compra, factor_compra");
+
+    if (insumosError) throw insumosError;
+
+    const overrides = await cargarOverridesCompra(
+      supabase,
+      obra_id,
+      "GET /api/insumo-compra-obra",
+    );
+
+    const respuesta: InsumoCompraObraResponse[] = (insumos ?? [])
+      .map((insumo) => ({
+        insumo_id: insumo.id,
+        ...resolverCompra(insumo, overrides.get(insumo.id) ?? null),
+      }))
+      // Sin factor no hay conversión que mostrar: se omite para no mandar
+      // una lista llena de nulls.
+      .filter((c) => c.factor_compra !== null);
+
+    return NextResponse.json(respuesta, { status: 200 });
+  } catch (error) {
+    const mensaje = loguearError("GET /api/insumo-compra-obra", error);
+    return NextResponse.json({ error: mensaje }, { status: 500 });
+  }
+}
 
 // POST /api/insumo-compra-obra
 //

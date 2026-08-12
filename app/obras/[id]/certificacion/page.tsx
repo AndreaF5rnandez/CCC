@@ -5,12 +5,14 @@ import { useParams } from 'next/navigation';
 import { ObraTabs } from '@/components/obras/ObraTabs';
 import { usePlanificacion } from '@/hooks/usePlanificacion';
 import { useCertificaciones } from '@/hooks/useCertificaciones';
+import { useConversionesCompra } from '@/hooks/useConversionesCompra';
 import { useInsumos } from '@/hooks/useInsumos';
 import type {
   CertificacionConDesvio,
   CertificacionDesvioInsumo,
   CertificacionInsumoPrevisto,
   Insumo,
+  InsumoCompraObraResponse,
   PlanificacionResponse,
 } from '@/types';
 
@@ -71,6 +73,47 @@ function hoyISO(): string {
   return `${d.getFullYear()}-${mes}-${dia}`;
 }
 
+/* ─── Unidad de carga ──────────────────────────────────────────────────────── */
+
+/* En obra nadie pesa el material: se cuentan bolsas, barras, rollos. Cuando el
+ * insumo tiene conversión configurada, todo lo que el encargado ve y escribe va
+ * en esa unidad de compra; la base queda como referencia secundaria.
+ *
+ * La conversión llega ya resuelta del backend (override de la obra sobre
+ * referencia del insumo, la misma que usa la explosión). Acá no se decide nada
+ * sobre el factor: solo se divide o se multiplica por él.
+ *
+ * Sin conversión configurada, el factor es 1 y todo sigue en unidad base.
+ */
+interface ConUnidad {
+  unidad_medida: string;
+  unidad_compra: string | null;
+  factor_compra: number | null;
+}
+
+interface UnidadDeCarga {
+  /** La etiqueta que se muestra y en la que se escribe. */
+  unidad: string;
+  /** Cuántas unidades base entran en una de carga. 1 = sin conversión. */
+  factor: number;
+  /** true si se está trabajando en unidad de compra, no en la base. */
+  convertido: boolean;
+}
+
+function unidadDeCarga(fila: ConUnidad): UnidadDeCarga {
+  const factor = fila.factor_compra;
+  if (fila.unidad_compra && factor !== null && factor > 0) {
+    return { unidad: fila.unidad_compra, factor, convertido: true };
+  }
+  return { unidad: fila.unidad_medida, factor: 1, convertido: false };
+}
+
+/** Pluralización simple: la unidad de compra es texto libre ("bolsa", "barra"). */
+function pluralizar(cantidad: number, unidad: string): string {
+  if (Math.abs(cantidad) === 1 || unidad.endsWith('s')) return unidad;
+  return `${unidad}s`;
+}
+
 /** Acepta coma o punto como separador decimal; vacío devuelve null. */
 function parsearCantidad(texto: string): number | null {
   const limpio = texto.trim().replace(',', '.');
@@ -85,10 +128,12 @@ function VistaRegistrar({
   datos,
   calcularPrevisto,
   crearCertificacion,
+  conversiones,
 }: {
   datos: PlanificacionResponse;
   calcularPrevisto: CertificacionesHook['calcularPrevisto'];
   crearCertificacion: CertificacionesHook['crearCertificacion'];
+  conversiones: Map<string, InsumoCompraObraResponse>;
 }) {
   // Solo materiales: esta fase de certificación no carga mano de obra ni equipo.
   const { insumos: materiales } = useInsumos('material');
@@ -186,26 +231,35 @@ function VistaRegistrar({
    * la fila prevista en vez de duplicarse). */
   const filasMaterial = useMemo(() => {
     const idsPrevistos = new Set(previstos.map((p) => p.insumo_id));
+    // Los agregados a mano no salen de ninguna receta, así que su conversión no
+    // viene en la respuesta del previsto: se busca en las de la obra.
     const filasExtra = extras
       .filter((e) => !idsPrevistos.has(e.id))
-      .map((e) => ({
-        insumo_id: e.id,
-        nombre: e.nombre,
-        unidad_medida: e.unidad_medida,
-        cantidad_prevista: 0,
-        esExtra: true,
-      }));
+      .map((e) => {
+        const conv = conversiones.get(e.id);
+        return {
+          insumo_id: e.id,
+          nombre: e.nombre,
+          unidad_medida: e.unidad_medida,
+          unidad_compra: conv?.unidad_compra ?? null,
+          factor_compra: conv?.factor_compra ?? null,
+          cantidad_prevista: 0,
+          esExtra: true,
+        };
+      });
     return [
       ...previstos.map((p) => ({
         insumo_id: p.insumo_id,
         nombre: p.nombre,
         unidad_medida: p.unidad_medida,
+        unidad_compra: p.unidad_compra,
+        factor_compra: p.factor_compra,
         cantidad_prevista: p.cantidad_prevista,
         esExtra: false,
       })),
       ...filasExtra,
     ];
-  }, [previstos, extras]);
+  }, [previstos, extras, conversiones]);
 
   const materialesDisponibles = useMemo(() => {
     const yaEnPantalla = new Set(filasMaterial.map((f) => f.insumo_id));
@@ -249,7 +303,11 @@ function VistaRegistrar({
         );
         return;
       }
-      insumos.push({ insumo_id: fila.insumo_id, cantidad_real: cantidad });
+      // Se escribe en unidad de compra y se guarda en unidad BASE: así la base
+      // queda toda en la misma unidad y el desvío compara contra el previsto
+      // sin depender de en qué unidad se cargó. Sin conversión el factor es 1.
+      const { factor } = unidadDeCarga(fila);
+      insumos.push({ insumo_id: fila.insumo_id, cantidad_real: cantidad * factor });
     }
 
     setGuardando(true);
@@ -461,53 +519,86 @@ function VistaRegistrar({
                 </tr>
               </thead>
               <tbody>
-                {filasMaterial.map((fila) => (
-                  <tr key={fila.insumo_id}>
-                    <td
-                      className="text-sm py-2 px-2"
-                      style={{ color: TEXTO, borderBottom: '1px solid rgba(0,0,0,0.04)' }}
-                    >
-                      {fila.nombre}
-                      {fila.esExtra && (
-                        <span
-                          className="ml-2 text-[11px] px-2 py-0.5 rounded-full"
-                          style={{ background: 'rgba(245, 166, 35, 0.15)', color: '#B45309' }}
-                        >
-                          no previsto
-                        </span>
-                      )}
-                    </td>
-                    <td
-                      className="text-sm py-2 px-2"
-                      style={{ color: TEXTO_3, borderBottom: '1px solid rgba(0,0,0,0.04)' }}
-                    >
-                      {fila.unidad_medida}
-                    </td>
-                    <td
-                      className="text-sm py-2 px-2 text-right tabular-nums"
-                      style={{ color: TEXTO_2, borderBottom: '1px solid rgba(0,0,0,0.04)' }}
-                    >
-                      {fila.esExtra ? '—' : formatNum(fila.cantidad_prevista, fila.unidad_medida)}
-                    </td>
-                    <td
-                      className="py-1.5 px-2"
-                      style={{ borderBottom: '1px solid rgba(0,0,0,0.04)' }}
-                    >
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        value={reales[fila.insumo_id] ?? ''}
-                        placeholder="0"
-                        onChange={(e) => {
-                          const valor = e.target.value;
-                          setReales((prev) => ({ ...prev, [fila.insumo_id]: valor }));
-                          setExito(null);
-                        }}
-                        style={{ ...INPUT, padding: '6px 10px', width: '100%', textAlign: 'right' }}
-                      />
-                    </td>
-                  </tr>
-                ))}
+                {filasMaterial.map((fila) => {
+                  const { unidad, factor, convertido } = unidadDeCarga(fila);
+                  const previstoEnCarga = fila.cantidad_prevista / factor;
+                  const borde = '1px solid rgba(0,0,0,0.04)';
+                  return (
+                    <tr key={fila.insumo_id}>
+                      <td className="text-sm py-2 px-2" style={{ color: TEXTO, borderBottom: borde }}>
+                        {fila.nombre}
+                        {fila.esExtra && (
+                          <span
+                            className="ml-2 text-[11px] px-2 py-0.5 rounded-full"
+                            style={{ background: 'rgba(245, 166, 35, 0.15)', color: '#B45309' }}
+                          >
+                            no previsto
+                          </span>
+                        )}
+                      </td>
+                      <td
+                        className="text-sm py-2 px-2"
+                        style={{ color: TEXTO_3, borderBottom: borde }}
+                      >
+                        {pluralizar(2, unidad)}
+                        {/* Con conversión, la unidad base queda como referencia. */}
+                        {convertido && (
+                          <span className="block text-[11px]" style={{ color: TEXTO_3 }}>
+                            de {fila.unidad_medida}
+                          </span>
+                        )}
+                      </td>
+                      <td
+                        className="text-sm py-2 px-2 text-right tabular-nums"
+                        style={{ color: TEXTO_2, borderBottom: borde }}
+                      >
+                        {fila.esExtra ? (
+                          '—'
+                        ) : (
+                          <>
+                            {formatNum(previstoEnCarga, unidad)}
+                            {convertido && (
+                              <span className="block text-[11px]" style={{ color: TEXTO_3 }}>
+                                {formatNum(fila.cantidad_prevista, fila.unidad_medida)}{' '}
+                                {fila.unidad_medida}
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </td>
+                      <td className="py-1.5 px-2" style={{ borderBottom: borde }}>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={reales[fila.insumo_id] ?? ''}
+                            placeholder="0"
+                            onChange={(e) => {
+                              const valor = e.target.value;
+                              setReales((prev) => ({ ...prev, [fila.insumo_id]: valor }));
+                              setExito(null);
+                            }}
+                            style={{
+                              ...INPUT,
+                              padding: '6px 10px',
+                              flex: 1,
+                              minWidth: 0,
+                              textAlign: 'right',
+                            }}
+                          />
+                          {/* La unidad al lado del campo: el encargado no tiene
+                              que deducir si escribe bolsas o kilos. */}
+                          <span
+                            className="text-xs shrink-0 whitespace-nowrap"
+                            style={{ color: TEXTO_2 }}
+                          >
+                            {pluralizar(2, unidad)}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -879,6 +970,11 @@ function TarjetaCertificacion({
                     const sev = clasificar(fila);
                     const color = COLOR_SEVERIDAD[sev];
                     const borde = '1px solid rgba(0,0,0,0.04)';
+                    /* Todo llega en unidad base; se muestra en unidad de compra
+                     * cuando hay factor, que es como el encargado lo piensa.
+                     * Dividir las tres por la misma constante mantiene la
+                     * resta coherente, y el porcentaje no cambia. */
+                    const { unidad, factor, convertido } = unidadDeCarga(fila);
                     return (
                       <tr key={fila.insumo_id}>
                         <td className="text-sm py-2 px-2" style={{ color: TEXTO, borderBottom: borde }}>
@@ -896,25 +992,30 @@ function TarjetaCertificacion({
                           className="text-sm py-2 px-2"
                           style={{ color: TEXTO_3, borderBottom: borde }}
                         >
-                          {fila.unidad_medida}
+                          {pluralizar(2, unidad)}
+                          {convertido && (
+                            <span className="block text-[11px]" style={{ color: TEXTO_3 }}>
+                              de {fila.unidad_medida}
+                            </span>
+                          )}
                         </td>
                         <td
                           className="text-sm py-2 px-2 text-right tabular-nums"
                           style={{ color: TEXTO_2, borderBottom: borde }}
                         >
-                          {formatNum(fila.cantidad_prevista, fila.unidad_medida)}
+                          {formatNum(fila.cantidad_prevista / factor, unidad)}
                         </td>
                         <td
                           className="text-sm py-2 px-2 text-right tabular-nums"
                           style={{ color: TEXTO, borderBottom: borde }}
                         >
-                          {formatNum(fila.cantidad_real, fila.unidad_medida)}
+                          {formatNum(fila.cantidad_real / factor, unidad)}
                         </td>
                         <td
                           className="text-sm py-2 px-2 text-right tabular-nums font-medium"
                           style={{ color: color.texto, borderBottom: borde }}
                         >
-                          {formatDesvio(fila.desvio_cantidad, fila.unidad_medida)}
+                          {formatDesvio(fila.desvio_cantidad / factor, unidad)}
                         </td>
                         <td
                           className="text-sm py-2 px-2 text-right tabular-nums font-medium"
@@ -1041,6 +1142,10 @@ export default function CertificacionPage() {
    * se guarda en Registrar aparece en Histórico sin volver a pedirlo. */
   const certificaciones = useCertificaciones(obraId);
 
+  /* Conversiones a unidad de compra de la obra. Las necesita Registrar para los
+   * materiales agregados a mano; los previstos ya vienen con la suya resuelta. */
+  const { conversiones } = useConversionesCompra(obraId);
+
   const [subtab, setSubtab] = useState<SubTabId>('registrar');
 
   return (
@@ -1097,6 +1202,7 @@ export default function CertificacionPage() {
                 datos={datos}
                 calcularPrevisto={certificaciones.calcularPrevisto}
                 crearCertificacion={certificaciones.crearCertificacion}
+                conversiones={conversiones}
               />
             )}
 

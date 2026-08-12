@@ -344,8 +344,13 @@ export interface CertificacionItemPrevisto {
   aporta_insumos: boolean;
 }
 
-/** Un insumo previsto, ya agrupado y sumado a lo largo de todos los ítems. */
-export interface CertificacionInsumoPrevisto extends InsumoConsumoBase {
+/** Un insumo previsto, ya agrupado y sumado a lo largo de todos los ítems.
+ *  `cantidad_prevista` va SIEMPRE en unidad base; la conversión a unidad de
+ *  compra viene resuelta (override de la obra sobre referencia del insumo),
+ *  igual que en la explosión, para que las dos pantallas usen el mismo factor. */
+export interface CertificacionInsumoPrevisto
+  extends InsumoConsumoBase,
+    CompraResuelta {
   cantidad_prevista: number;
 }
 
@@ -382,8 +387,15 @@ export interface CertificacionInsumoReal extends InsumoConsumoBase {
 export type DesvioOrigen = "ambos" | "solo_previsto" | "solo_real";
 
 /** Desvío de un insumo dentro de una certificación. No se guarda: se calcula
- *  al momento cruzando el previsto de las recetas contra el real cargado. */
-export interface CertificacionDesvioInsumo extends InsumoConsumoBase {
+ *  al momento cruzando el previsto de las recetas contra el real cargado.
+ *
+ *  Todas las cantidades van en unidad BASE del insumo. La conversión a unidad
+ *  de compra viene resuelta para que la vista la muestre en bolsas/barras sin
+ *  volver a decidir el factor: como es una división por una constante, el
+ *  porcentaje de desvío es el mismo en las dos unidades. */
+export interface CertificacionDesvioInsumo
+  extends InsumoConsumoBase,
+    CompraResuelta {
   cantidad_prevista: number;
   cantidad_real: number;
   // real − previsto. Positivo = se consumió de más.
