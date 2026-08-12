@@ -7,10 +7,14 @@ import { usePlanificacion } from '@/hooks/usePlanificacion';
 import { useCertificaciones } from '@/hooks/useCertificaciones';
 import { useInsumos } from '@/hooks/useInsumos';
 import type {
+  CertificacionConDesvio,
+  CertificacionDesvioInsumo,
   CertificacionInsumoPrevisto,
   Insumo,
   PlanificacionResponse,
 } from '@/types';
+
+type CertificacionesHook = ReturnType<typeof useCertificaciones>;
 
 /* ─── Estilo base (skill de diseño) ────────────────────────────────────────── */
 
@@ -78,13 +82,14 @@ function parsearCantidad(texto: string): number | null {
 /* ─── Vista: Registrar ─────────────────────────────────────────────────────── */
 
 function VistaRegistrar({
-  obraId,
   datos,
+  calcularPrevisto,
+  crearCertificacion,
 }: {
-  obraId: string;
   datos: PlanificacionResponse;
+  calcularPrevisto: CertificacionesHook['calcularPrevisto'];
+  crearCertificacion: CertificacionesHook['crearCertificacion'];
 }) {
-  const { calcularPrevisto, crearCertificacion } = useCertificaciones(obraId);
   // Solo materiales: esta fase de certificación no carga mano de obra ni equipo.
   const { insumos: materiales } = useInsumos('material');
 
@@ -614,6 +619,405 @@ function VistaRegistrar({
   );
 }
 
+/* ─── Vista: Histórico ─────────────────────────────────────────────────────── */
+
+/* Banda de tolerancia, solo de presentación: un desvío de menos de 1% se lee
+ * como "en línea" en vez de pintarse de rojo por un decimal. No cambia ningún
+ * número, solo el color y la etiqueta. */
+const TOLERANCIA_PCT = 1;
+
+type Severidad = 'de_mas' | 'de_menos' | 'en_linea' | 'no_previsto' | 'sin_consumo';
+
+function clasificar(fila: CertificacionDesvioInsumo): Severidad {
+  if (fila.origen === 'solo_real') return 'no_previsto';
+  if (fila.origen === 'solo_previsto') return 'sin_consumo';
+  if (fila.desvio_pct !== null && Math.abs(fila.desvio_pct) <= TOLERANCIA_PCT) {
+    return 'en_linea';
+  }
+  return fila.desvio_cantidad > 0 ? 'de_mas' : 'de_menos';
+}
+
+const COLOR_SEVERIDAD: Record<Severidad, { texto: string; fondo: string; etiqueta: string }> = {
+  de_mas: { texto: '#DC2626', fondo: 'rgba(239, 68, 68, 0.12)', etiqueta: 'de más' },
+  de_menos: { texto: '#15803D', fondo: 'rgba(34, 197, 94, 0.12)', etiqueta: 'de menos' },
+  en_linea: { texto: '#15803D', fondo: 'rgba(34, 197, 94, 0.10)', etiqueta: 'en línea' },
+  no_previsto: { texto: '#B45309', fondo: 'rgba(245, 166, 35, 0.15)', etiqueta: 'no previsto' },
+  sin_consumo: { texto: '#6B7080', fondo: 'rgba(107, 112, 128, 0.12)', etiqueta: 'sin consumo' },
+};
+
+/* Signo explícito y el mismo glifo de menos en las dos columnas del desvío:
+ * Intl usa guión y quedaba desparejo al lado del menos tipográfico. */
+function conSigno(v: number, cuerpo: string): string {
+  if (v > 0) return `+${cuerpo}`;
+  if (v < 0) return `−${cuerpo}`;
+  return cuerpo;
+}
+
+function formatPct(v: number): string {
+  const cuerpo =
+    new Intl.NumberFormat('es-AR', { maximumFractionDigits: 1 }).format(Math.abs(v)) + '%';
+  return conSigno(v, cuerpo);
+}
+
+function formatDesvio(v: number, unidad: string): string {
+  return conSigno(v, formatNum(Math.abs(v), unidad));
+}
+
+function formatFecha(iso: string): string {
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return iso;
+  return new Intl.DateTimeFormat('es-AR', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date(Date.UTC(y, m - 1, d)));
+}
+
+function TarjetaCertificacion({
+  certificacion,
+  onEliminar,
+}: {
+  certificacion: CertificacionConDesvio;
+  onEliminar: (id: string) => Promise<void>;
+}) {
+  const [abierta, setAbierta] = useState(false);
+  const [confirmando, setConfirmando] = useState(false);
+  const [borrando, setBorrando] = useState(false);
+  const [errorBorrar, setErrorBorrar] = useState<string | null>(null);
+
+  // Solo materiales: esta fase de certificación es de materiales.
+  const materiales = useMemo(
+    () => certificacion.desvio.filter((d) => d.tipo === 'material'),
+    [certificacion.desvio],
+  );
+
+  const resumen = useMemo(() => {
+    let deMas = 0;
+    let deMenos = 0;
+    let noPrevistos = 0;
+    let sinConsumo = 0;
+    for (const fila of materiales) {
+      const sev = clasificar(fila);
+      if (sev === 'de_mas') deMas++;
+      else if (sev === 'de_menos') deMenos++;
+      else if (sev === 'no_previsto') noPrevistos++;
+      else if (sev === 'sin_consumo') sinConsumo++;
+    }
+    return { deMas, deMenos, noPrevistos, sinConsumo };
+  }, [materiales]);
+
+  const borrar = useCallback(async () => {
+    setErrorBorrar(null);
+    setBorrando(true);
+    try {
+      await onEliminar(certificacion.id);
+      // No hace falta cerrar nada: la tarjeta se desmonta al salir de la lista.
+    } catch (err) {
+      setErrorBorrar((err as Error).message);
+      setBorrando(false);
+      setConfirmando(false);
+    }
+  }, [onEliminar, certificacion.id]);
+
+  return (
+    <div style={GLASS_CARD}>
+      {/* ── Cabecera ── */}
+      <div className="flex items-center gap-3 p-4">
+        <button
+          onClick={() => setAbierta((v) => !v)}
+          className="flex items-center gap-3 flex-1 min-w-0 text-left"
+        >
+          <span
+            className="text-xs shrink-0 transition-transform"
+            style={{
+              color: TEXTO_3,
+              transform: abierta ? 'rotate(90deg)' : 'none',
+              display: 'inline-block',
+            }}
+          >
+            ▶
+          </span>
+          <span className="text-sm font-semibold shrink-0" style={{ color: TEXTO }}>
+            {formatFecha(certificacion.fecha)}
+          </span>
+          <span className="text-sm truncate" style={{ color: TEXTO_2 }}>
+            {certificacion.descripcion ?? 'Sin descripción'}
+          </span>
+        </button>
+
+        {/* Resumen del desvío, para no tener que expandir */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="text-xs" style={{ color: TEXTO_3 }}>
+            {certificacion.items.length}{' '}
+            {certificacion.items.length === 1 ? 'ítem' : 'ítems'}
+          </span>
+          {resumen.deMas > 0 && (
+            <Chip severidad="de_mas" texto={`${resumen.deMas} de más`} />
+          )}
+          {resumen.deMenos > 0 && (
+            <Chip severidad="de_menos" texto={`${resumen.deMenos} de menos`} />
+          )}
+          {resumen.noPrevistos > 0 && (
+            <Chip severidad="no_previsto" texto={`${resumen.noPrevistos} no previsto`} />
+          )}
+          {resumen.sinConsumo > 0 && (
+            <Chip severidad="sin_consumo" texto={`${resumen.sinConsumo} sin consumo`} />
+          )}
+        </div>
+
+        {/* Borrar, con confirmación en línea */}
+        {confirmando ? (
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-xs" style={{ color: TEXTO_2 }}>
+              ¿Borrar?
+            </span>
+            <button
+              onClick={borrar}
+              disabled={borrando}
+              className="text-xs font-semibold px-3 py-1 rounded-full disabled:opacity-40"
+              style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#DC2626' }}
+            >
+              {borrando ? 'Borrando…' : 'Sí, borrar'}
+            </button>
+            <button
+              onClick={() => setConfirmando(false)}
+              disabled={borrando}
+              className="text-xs font-medium px-3 py-1 rounded-full disabled:opacity-40"
+              style={{ color: TEXTO_2 }}
+            >
+              Cancelar
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmando(true)}
+            className="text-xs font-medium px-3 py-1 rounded-full shrink-0 transition-colors hover:bg-black/[0.04]"
+            style={{ color: TEXTO_3 }}
+          >
+            Borrar
+          </button>
+        )}
+      </div>
+
+      {errorBorrar && (
+        <div className="px-4 pb-3">
+          <div
+            className="p-3 rounded-xl"
+            style={{
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.30)',
+            }}
+          >
+            <p className="text-sm font-medium" style={{ color: '#DC2626' }}>
+              {errorBorrar}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Detalle ── */}
+      {abierta && (
+        <div className="px-4 pb-4" style={{ borderTop: BORDE_SUTIL }}>
+          {/* Ítems ejecutados */}
+          <div className="py-3">
+            <p
+              className="text-xs font-semibold uppercase tracking-wide mb-1.5"
+              style={{ color: TEXTO_3 }}
+            >
+              Ítems ejecutados
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {certificacion.items.map((item) => (
+                <span
+                  key={item.item_id}
+                  className="text-xs px-2.5 py-1 rounded-full"
+                  style={{ background: 'rgba(0, 0, 0, 0.04)', color: TEXTO_2 }}
+                >
+                  {item.descripcion}
+                  <span style={{ color: TEXTO_3 }}>
+                    {' · '}
+                    {formatNum(item.cantidad_ejecutada, item.unidad_medida)}{' '}
+                    {item.unidad_medida}
+                  </span>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Tabla de desvío */}
+          {materiales.length === 0 ? (
+            <p className="text-sm py-2" style={{ color: TEXTO_2 }}>
+              Esta certificación no tiene materiales previstos ni consumo cargado.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px]">
+                <thead>
+                  <tr>
+                    {['Material', 'Unidad'].map((h) => (
+                      <th
+                        key={h}
+                        className="text-left text-[13px] font-semibold py-2 px-2"
+                        style={{ color: TEXTO_2, borderBottom: BORDE_SUTIL }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                    {['Previsto', 'Real', 'Desvío', '%'].map((h) => (
+                      <th
+                        key={h}
+                        className="text-right text-[13px] font-semibold py-2 px-2 w-28"
+                        style={{ color: TEXTO_2, borderBottom: BORDE_SUTIL }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {materiales.map((fila) => {
+                    const sev = clasificar(fila);
+                    const color = COLOR_SEVERIDAD[sev];
+                    const borde = '1px solid rgba(0,0,0,0.04)';
+                    return (
+                      <tr key={fila.insumo_id}>
+                        <td className="text-sm py-2 px-2" style={{ color: TEXTO, borderBottom: borde }}>
+                          {fila.nombre}
+                          {(sev === 'no_previsto' || sev === 'sin_consumo') && (
+                            <span
+                              className="ml-2 text-[11px] px-2 py-0.5 rounded-full"
+                              style={{ background: color.fondo, color: color.texto }}
+                            >
+                              {color.etiqueta}
+                            </span>
+                          )}
+                        </td>
+                        <td
+                          className="text-sm py-2 px-2"
+                          style={{ color: TEXTO_3, borderBottom: borde }}
+                        >
+                          {fila.unidad_medida}
+                        </td>
+                        <td
+                          className="text-sm py-2 px-2 text-right tabular-nums"
+                          style={{ color: TEXTO_2, borderBottom: borde }}
+                        >
+                          {formatNum(fila.cantidad_prevista, fila.unidad_medida)}
+                        </td>
+                        <td
+                          className="text-sm py-2 px-2 text-right tabular-nums"
+                          style={{ color: TEXTO, borderBottom: borde }}
+                        >
+                          {formatNum(fila.cantidad_real, fila.unidad_medida)}
+                        </td>
+                        <td
+                          className="text-sm py-2 px-2 text-right tabular-nums font-medium"
+                          style={{ color: color.texto, borderBottom: borde }}
+                        >
+                          {formatDesvio(fila.desvio_cantidad, fila.unidad_medida)}
+                        </td>
+                        <td
+                          className="text-sm py-2 px-2 text-right tabular-nums font-medium"
+                          style={{ color: color.texto, borderBottom: borde }}
+                        >
+                          {/* Sin previsto no hay porcentaje posible: se muestra
+                              la diferencia en cantidad y acá va "n/a". */}
+                          {fila.desvio_pct === null ? (
+                            <span style={{ color: TEXTO_3 }}>n/a</span>
+                          ) : (
+                            formatPct(fila.desvio_pct)
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Chip({ severidad, texto }: { severidad: Severidad; texto: string }) {
+  const color = COLOR_SEVERIDAD[severidad];
+  return (
+    <span
+      className="text-[11px] px-2 py-0.5 rounded-full whitespace-nowrap"
+      style={{ background: color.fondo, color: color.texto }}
+    >
+      {texto}
+    </span>
+  );
+}
+
+function VistaHistorico({
+  lista,
+  cargando,
+  error,
+  eliminarCertificacion,
+}: {
+  lista: CertificacionConDesvio[];
+  cargando: boolean;
+  error: string | null;
+  eliminarCertificacion: CertificacionesHook['eliminarCertificacion'];
+}) {
+  // Más reciente primero: el endpoint las manda en orden cronológico y acá
+  // interesa lo último ejecutado.
+  const ordenadas = useMemo(() => lista.slice().reverse(), [lista]);
+
+  if (cargando) {
+    return (
+      <div className="flex items-center justify-center h-40">
+        <p style={{ color: TEXTO_2 }}>Cargando certificaciones…</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div
+        className="p-4 rounded-2xl"
+        style={{
+          background: 'rgba(239, 68, 68, 0.12)',
+          border: '1px solid rgba(239, 68, 68, 0.30)',
+        }}
+      >
+        <p className="text-sm font-medium" style={{ color: '#DC2626' }}>
+          {error}
+        </p>
+      </div>
+    );
+  }
+
+  if (ordenadas.length === 0) {
+    return (
+      <section style={GLASS_CARD} className="p-8 text-center">
+        <p className="text-sm" style={{ color: TEXTO_2 }}>
+          Todavía no registraste certificaciones en esta obra.
+        </p>
+        <p className="text-sm mt-1" style={{ color: TEXTO_3 }}>
+          Cargá la primera desde la solapa Registrar.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {ordenadas.map((cert) => (
+        <TarjetaCertificacion
+          key={cert.id}
+          certificacion={cert}
+          onEliminar={eliminarCertificacion}
+        />
+      ))}
+    </div>
+  );
+}
+
 /* ─── Página ───────────────────────────────────────────────────────────────── */
 
 type SubTabId = 'registrar' | 'historico';
@@ -632,6 +1036,10 @@ export default function CertificacionPage() {
    * sale también el nombre de la obra). Se reutiliza en vez de pedir rubros,
    * ítems y mediciones por separado desde el cliente. */
   const { datos, cargando, error } = usePlanificacion(obraId);
+
+  /* El hook de certificaciones vive acá y no dentro de cada vista: así lo que
+   * se guarda en Registrar aparece en Histórico sin volver a pedirlo. */
+  const certificaciones = useCertificaciones(obraId);
 
   const [subtab, setSubtab] = useState<SubTabId>('registrar');
 
@@ -684,14 +1092,21 @@ export default function CertificacionPage() {
               ))}
             </div>
 
-            {subtab === 'registrar' && <VistaRegistrar obraId={obraId} datos={datos} />}
+            {subtab === 'registrar' && (
+              <VistaRegistrar
+                datos={datos}
+                calcularPrevisto={certificaciones.calcularPrevisto}
+                crearCertificacion={certificaciones.crearCertificacion}
+              />
+            )}
 
             {subtab === 'historico' && (
-              <section style={GLASS_CARD} className="p-8 text-center">
-                <p className="text-sm" style={{ color: TEXTO_2 }}>
-                  El histórico de certificaciones y sus desvíos se construye en el próximo paso.
-                </p>
-              </section>
+              <VistaHistorico
+                lista={certificaciones.lista}
+                cargando={certificaciones.cargando}
+                error={certificaciones.error}
+                eliminarCertificacion={certificaciones.eliminarCertificacion}
+              />
             )}
           </>
         )}
