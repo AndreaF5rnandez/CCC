@@ -8,6 +8,7 @@ import {
   resolverCompra,
 } from "./calculos";
 import { cargarOverridesCompra, type OverrideCompra } from "./compra";
+import { validarFechaISO } from "./fecha";
 import type {
   Insumo,
   Item,
@@ -286,8 +287,6 @@ export type ResultadoValidacion =
   | { ok: true; datos: PayloadCertificacion }
   | { ok: false; error: string };
 
-const FORMATO_FECHA = /^\d{4}-\d{2}-\d{2}$/;
-
 /**
  * Valida y normaliza el cuerpo de una certificación.
  *
@@ -321,21 +320,10 @@ export function validarPayloadCertificacion(
   }
 
   // La fecha es libre (la elige el encargado), pero tiene que ser una fecha.
-  if (typeof payload.fecha !== "string" || !FORMATO_FECHA.test(payload.fecha)) {
-    return { ok: false, error: "La fecha es obligatoria, con formato AAAA-MM-DD" };
-  }
-  // `new Date("2026-02-31")` NO da inválido: JS corre el día sobrante al mes
-  // siguiente. Se compara el ida y vuelta para cazar los días que no existen.
-  const [anio, mes, dia] = payload.fecha.split("-").map(Number);
-  const fechaParseada = new Date(Date.UTC(anio, mes - 1, dia));
-  if (
-    Number.isNaN(fechaParseada.getTime()) ||
-    fechaParseada.getUTCFullYear() !== anio ||
-    fechaParseada.getUTCMonth() !== mes - 1 ||
-    fechaParseada.getUTCDate() !== dia
-  ) {
-    return { ok: false, error: `La fecha ${payload.fecha} no existe` };
-  }
+  // El chequeo del día inexistente (31 de febrero) vive en lib/fecha.ts,
+  // compartido con el registro de compras.
+  const fecha = validarFechaISO(payload.fecha);
+  if (!fecha.ok) return { ok: false, error: fecha.error };
 
   if (
     payload.descripcion !== undefined &&
@@ -461,7 +449,7 @@ export function validarPayloadCertificacion(
 
   return {
     ok: true,
-    datos: { fecha: payload.fecha, descripcion: descripcionLimpia, items, insumos },
+    datos: { fecha: fecha.fecha, descripcion: descripcionLimpia, items, insumos },
   };
 }
 

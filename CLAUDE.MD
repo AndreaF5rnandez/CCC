@@ -22,6 +22,7 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 | `certificacion_items` | id, certificacion_id, item_id, cantidad_ejecutada? (NULL = ítem completo) — UNIQUE (certificacion_id, item_id) |
 | `certificacion_insumos` | id, certificacion_id, insumo_id, cantidad_real — UNIQUE (certificacion_id, insumo_id) |
 | `certificacion_mediciones` | id, certificacion_id, medicion_id — qué mediciones se ejecutaron; UNIQUE (certificacion_id, medicion_id) |
+| `compras` | id, obra_id, insumo_id, fecha, cantidad, precio_unitario_compra, proveedor? — cantidad y precio en **unidad de COMPRA**; SIN UNIQUE: varias compras del mismo insumo por obra |
 
 **Reglas críticas de DB:**
 - `cantidad_calculada` = `n × COALESCE(largo,1) × COALESCE(ancho,1) × COALESCE(alto,1)` — GENERATED ALWAYS, nunca enviarlo desde backend
@@ -52,6 +53,9 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
   + qué mediciones ya se certificaron
 - `GET/POST /api/certificaciones` — GET requiere `?obra_id=uuid`; trae el desvío calculado
 - `GET/PUT/DELETE /api/certificaciones/[id]` — PUT reemplaza ítems e insumos enteros
+- `GET/POST /api/compras` — GET requiere `?obra_id=uuid`; devuelve `{ obra_id, compras, consolidado }`
+  con el desvío de PRECIO por compra y el consolidado por insumo (promedio ponderado)
+- `GET/PUT/DELETE /api/compras/[id]` — PUT no permite mover la compra de obra
 
 ## Hooks
 - `useInsumos(tipo?)`, `useRecetas()`, `useObras(estado?)`, `useMediciones(obraId)`
@@ -66,6 +70,10 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 - `app/obras/[id]/page.tsx` — hub de obra con links a Cómputo y Presupuesto
 - `app/obras/[id]/medicion/page.tsx` — cómputo métrico con rubros, ítems y mediciones inline
 - `app/recetas/page.tsx` — construida
+- `app/obras/[id]/certificacion/page.tsx` — sub-solapas Registrar, Histórico y Compras y precios
+- `components/obras/VistaCompras.tsx` — registro de compras + desvío de precio consolidado
+- `components/ui/estiloPragma.ts` (tokens glass) y `lib/formato.ts` (números, fechas, unidades)
+  son compartidos: no volver a definirlos dentro de una página
 
 ## Pendiente
 1. Mejoras pantalla Insumos: unidades como select (m2, u, m, m3, kg, km, t, l, h, d, a, ha, cm3, cm2, dm3, mu, cu, mes + "Otra"), tipos personalizados, carga Enter-to-next
@@ -91,3 +99,7 @@ pragma-textoClaro:  #7A6A5A
 - El presupuesto no se guarda: se calcula al momento desde mediciones + recetas + insumos
 - El desvío de certificación tampoco se guarda: se calcula al leer, cruzando el previsto de
   las recetas contra `certificacion_insumos.cantidad_real`
+- El desvío de PRECIO tampoco se guarda: se calcula al leer, comparando
+  `compras.precio_unitario_compra` contra `insumos.precio_unitario × factor_compra`
+- La conversión a unidad de compra sale SIEMPRE de `resolverCompra()` (`lib/calculos.ts`):
+  la usan la explosión, la certificación y las compras, para que los números coincidan

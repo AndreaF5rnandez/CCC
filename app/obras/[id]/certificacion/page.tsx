@@ -3,6 +3,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { ObraTabs } from '@/components/obras/ObraTabs';
+import { VistaCompras } from '@/components/obras/VistaCompras';
+import {
+  ACENTO,
+  ACENTO_TEXTO,
+  BORDE_SUTIL,
+  GLASS_CARD,
+  INPUT,
+  MESH_GRADIENT,
+  TEXTO,
+  TEXTO_2,
+  TEXTO_3,
+} from '@/components/ui/estiloPragma';
+import {
+  conSigno,
+  formatDesvio,
+  formatFecha,
+  formatNum,
+  formatPct,
+  hoyISO,
+  parsearCantidad,
+  pluralizar,
+  unidadDeCarga,
+} from '@/lib/formato';
 import { useCertificacionItems } from '@/hooks/useCertificacionItems';
 import { useCertificaciones } from '@/hooks/useCertificaciones';
 import { useConversionesCompra } from '@/hooks/useConversionesCompra';
@@ -36,109 +59,9 @@ import type {
 
 type CertificacionesHook = ReturnType<typeof useCertificaciones>;
 
-/* ─── Estilo base (skill de diseño) ────────────────────────────────────────── */
-
-const MESH_GRADIENT = [
-  'radial-gradient(ellipse at 15% 80%, rgba(200, 230, 76, 0.12) 0%, transparent 50%)',
-  'radial-gradient(ellipse at 85% 20%, rgba(200, 180, 220, 0.15) 0%, transparent 50%)',
-  'radial-gradient(ellipse at 80% 85%, rgba(180, 220, 210, 0.12) 0%, transparent 50%)',
-  'radial-gradient(ellipse at 50% 50%, rgba(215, 210, 220, 0.3) 0%, transparent 70%)',
-  'linear-gradient(135deg, #D8D6DE 0%, #CDCBD5 50%, #D2D0D8 100%)',
-].join(', ');
-
-const GLASS_CARD: React.CSSProperties = {
-  background: 'rgba(255, 255, 255, 0.55)',
-  backdropFilter: 'blur(20px)',
-  WebkitBackdropFilter: 'blur(20px)',
-  border: '1px solid rgba(255, 255, 255, 0.60)',
-  borderRadius: '16px',
-  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.06)',
-};
-
-const INPUT: React.CSSProperties = {
-  padding: '10px 14px',
-  border: '1px solid rgba(0, 0, 0, 0.12)',
-  borderRadius: '10px',
-  fontSize: '14px',
-  color: '#1A1A2E',
-  background: 'rgba(255, 255, 255, 0.6)',
-  backdropFilter: 'blur(8px)',
-  outline: 'none',
-};
-
-const ACENTO = '#C8E64C';
-const ACENTO_TEXTO = '#2A3300';
-const TEXTO = '#1A1A2E';
-const TEXTO_2 = '#6B7080';
-const TEXTO_3 = '#9CA3AF';
-const BORDE_SUTIL = '1px solid rgba(0, 0, 0, 0.06)';
-
-/* ─── Helpers ──────────────────────────────────────────────────────────────── */
-
-function formatNum(v: number, unidad: string): string {
-  // Los insumos por unidad entera (ladrillos) no muestran decimales.
-  const enteros = unidad.trim().toLowerCase() === 'u';
-  return new Intl.NumberFormat('es-AR', {
-    maximumFractionDigits: enteros ? 0 : 2,
-  }).format(enteros ? Math.round(v) : v);
-}
-
-function hoyISO(): string {
-  // Fecha local, no UTC: en Argentina toDateString UTC puede caer un día antes.
-  const d = new Date();
-  const mes = String(d.getMonth() + 1).padStart(2, '0');
-  const dia = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mes}-${dia}`;
-}
-
-/* ─── Unidad de carga ──────────────────────────────────────────────────────── */
-
-/* En obra nadie pesa el material: se cuentan bolsas, barras, rollos. Cuando el
- * insumo tiene conversión configurada, todo lo que el encargado ve y escribe va
- * en esa unidad de compra; la base queda como referencia secundaria.
- *
- * La conversión llega ya resuelta del backend (override de la obra sobre
- * referencia del insumo, la misma que usa la explosión). Acá no se decide nada
- * sobre el factor: solo se divide o se multiplica por él.
- *
- * Sin conversión configurada, el factor es 1 y todo sigue en unidad base.
- */
-interface ConUnidad {
-  unidad_medida: string;
-  unidad_compra: string | null;
-  factor_compra: number | null;
-}
-
-interface UnidadDeCarga {
-  /** La etiqueta que se muestra y en la que se escribe. */
-  unidad: string;
-  /** Cuántas unidades base entran en una de carga. 1 = sin conversión. */
-  factor: number;
-  /** true si se está trabajando en unidad de compra, no en la base. */
-  convertido: boolean;
-}
-
-function unidadDeCarga(fila: ConUnidad): UnidadDeCarga {
-  const factor = fila.factor_compra;
-  if (fila.unidad_compra && factor !== null && factor > 0) {
-    return { unidad: fila.unidad_compra, factor, convertido: true };
-  }
-  return { unidad: fila.unidad_medida, factor: 1, convertido: false };
-}
-
-/** Pluralización simple: la unidad de compra es texto libre ("bolsa", "barra"). */
-function pluralizar(cantidad: number, unidad: string): string {
-  if (Math.abs(cantidad) === 1 || unidad.endsWith('s')) return unidad;
-  return `${unidad}s`;
-}
-
-/** Acepta coma o punto como separador decimal; vacío devuelve null. */
-function parsearCantidad(texto: string): number | null {
-  const limpio = texto.trim().replace(',', '.');
-  if (limpio === '') return null;
-  const n = Number(limpio);
-  return Number.isFinite(n) && n >= 0 ? n : null;
-}
+/* Los tokens de diseño y los helpers de formato viven en módulos compartidos:
+ * los usan también la sub-solapa de Compras y, a futuro, el resto de las
+ * pantallas de obra. Acá solo se consumen. */
 
 /* ─── Selección a nivel medición ────────────────────────────────────────────── */
 
@@ -1006,34 +929,6 @@ const COLOR_SEVERIDAD: Record<Severidad, { texto: string; fondo: string; etiquet
   sin_consumo: { texto: '#6B7080', fondo: 'rgba(107, 112, 128, 0.12)', etiqueta: 'sin consumo' },
 };
 
-/* Signo explícito y el mismo glifo de menos en las dos columnas del desvío:
- * Intl usa guión y quedaba desparejo al lado del menos tipográfico. */
-function conSigno(v: number, cuerpo: string): string {
-  if (v > 0) return `+${cuerpo}`;
-  if (v < 0) return `−${cuerpo}`;
-  return cuerpo;
-}
-
-function formatPct(v: number): string {
-  const cuerpo =
-    new Intl.NumberFormat('es-AR', { maximumFractionDigits: 1 }).format(Math.abs(v)) + '%';
-  return conSigno(v, cuerpo);
-}
-
-function formatDesvio(v: number, unidad: string): string {
-  return conSigno(v, formatNum(Math.abs(v), unidad));
-}
-
-function formatFecha(iso: string): string {
-  const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  return new Intl.DateTimeFormat('es-AR', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  }).format(new Date(Date.UTC(y, m - 1, d)));
-}
-
 function TarjetaCertificacion({
   certificacion,
   onEliminar,
@@ -1391,11 +1286,12 @@ function VistaHistorico({
 
 /* ─── Página ───────────────────────────────────────────────────────────────── */
 
-type SubTabId = 'registrar' | 'historico';
+type SubTabId = 'registrar' | 'historico' | 'compras';
 
 const SUBTABS: { id: SubTabId; label: string }[] = [
   { id: 'registrar', label: 'Registrar' },
   { id: 'historico', label: 'Histórico' },
+  { id: 'compras', label: 'Compras y precios' },
 ];
 
 export default function CertificacionPage() {
@@ -1485,6 +1381,10 @@ export default function CertificacionPage() {
                 eliminarCertificacion={certificaciones.eliminarCertificacion}
               />
             )}
+
+            {/* Compras vive en su propio módulo y trae sus propios datos: no
+                comparte estado con Registrar ni con Histórico. */}
+            {subtab === 'compras' && <VistaCompras obraId={obraId} />}
           </>
         )}
       </div>

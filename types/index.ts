@@ -476,3 +476,105 @@ export interface CertificacionRequest {
   items: Array<string | CertificacionItemEjecutado>;
   insumos: Array<{ insumo_id: string; cantidad_real: number }>;
 }
+
+/* ─── Registro de compras y desvío de PRECIO ───────────────────────────────── */
+
+/** Fila de `compras`.
+ *
+ *  `cantidad` y `precio_unitario_compra` van en unidad de COMPRA (50 bolsas a
+ *  $153,75 la bolsa), no en unidad base. Es la unidad en la que el encargado
+ *  compra y en la que le llega la factura; la conversión a unidad base se hace
+ *  al calcular, no al guardar. */
+export interface Compra {
+  id: string;
+  obra_id: string;
+  insumo_id: string;
+  fecha: string;
+  cantidad: number;
+  precio_unitario_compra: number;
+  proveedor: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Desvío de precio: lo pagado contra lo presupuestado, ya llevados los dos a
+ *  la MISMA unidad de compra.
+ *
+ *  El precio presupuestado (`insumos.precio_unitario`) está en unidad base, así
+ *  que se multiplica por el factor de compra vigente en la obra:
+ *
+ *    precio_previsto_compra = precio_unitario × factor_compra
+ *    (6,15 $/kg × 25 kg/bolsa = 153,75 $/bolsa)
+ *
+ *  Un insumo sin factor configurado se compra en su unidad base, así que el
+ *  previsto es el precio base tal cual (factor implícito 1) y la comparación
+ *  sale directa, sin conversión.
+ *
+ *  Nada de esto se guarda: se recalcula en cada lectura, igual que el desvío de
+ *  cantidad de la certificación. */
+export interface DesvioPrecio {
+  // Precio presupuestado del insumo, en unidad de compra.
+  precio_previsto_compra: number;
+  // pagado − previsto. Positivo = se pagó de más.
+  desvio_precio: number;
+  // (pagado − previsto) / previsto × 100.
+  // null = no calculable porque el insumo no tiene precio presupuestado.
+  desvio_pct: number | null;
+}
+
+/** Una compra con el insumo resuelto, la conversión de la obra y su desvío. */
+export interface CompraConDesvio extends Compra, InsumoConsumoBase, CompraResuelta, DesvioPrecio {
+  // Total pagado por esta compra: cantidad × precio_unitario_compra.
+  gasto: number;
+}
+
+/** Desvío de precio consolidado de un insumo a lo largo de toda la obra.
+ *
+ *  El precio real es el PROMEDIO PONDERADO por cantidad, no el promedio simple:
+ *
+ *    precio_promedio_compra = Σ(cantidad × precio) / Σ(cantidad)
+ *
+ *  Así una compra de 100 bolsas pesa lo que tiene que pesar frente a una de 5.
+ *  El promedio simple diría otra cosa y sería la respuesta equivocada. */
+export interface CompraConsolidadaInsumo
+  extends InsumoConsumoBase,
+    CompraResuelta,
+    DesvioPrecio {
+  // Cuántas compras de este insumo hay en la obra.
+  cantidad_compras: number;
+  // Suma de las cantidades compradas, en unidad de compra.
+  cantidad_total: number;
+  // Lo realmente gastado en este insumo: Σ(cantidad × precio).
+  gasto_total: number;
+  // Lo que habría costado esa misma cantidad al precio presupuestado.
+  gasto_previsto: number;
+  // gasto_total − gasto_previsto: el desvío de precio en plata.
+  desvio_gasto: number;
+  // Promedio ponderado de lo pagado, en unidad de compra.
+  precio_promedio_compra: number;
+}
+
+/** Respuesta de GET /api/compras?obra_id=.
+ *
+ *  Las compras y su consolidado viajan juntos a propósito: salen de los mismos
+ *  datos y del mismo factor de compra, así que calcularlos en una sola pasada
+ *  garantiza que las dos tablas de la pantalla no puedan discrepar. */
+export interface ComprasResponse {
+  obra_id: string;
+  // Orden cronológico (fecha, y dentro del día por orden de carga).
+  compras: CompraConDesvio[];
+  // Un renglón por insumo con compras en la obra.
+  consolidado: CompraConsolidadaInsumo[];
+}
+
+/** Body de POST /api/compras y de PUT /api/compras/[id].
+ *  En el PUT la obra no se puede cambiar: mover una compra de obra cambiaría el
+ *  factor de conversión con el que se calculó su desvío. */
+export interface CompraRequest {
+  obra_id: string;
+  insumo_id: string;
+  fecha: string;
+  cantidad: number;
+  precio_unitario_compra: number;
+  proveedor?: string | null;
+}
