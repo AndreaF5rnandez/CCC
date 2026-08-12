@@ -4,7 +4,9 @@ import type {
   GastoGeneral,
   GastoGeneralCalculado,
   GastosGeneralesResumen,
+  Insumo,
   InsumoCompraObra,
+  InsumoConsumoBase,
   PaqueteEmpresario,
   PresupuestoLinea,
   RecetaConInsumos,
@@ -66,6 +68,50 @@ export function calcularCantidadMedicion(
 ): number {
   const factor = (v?: number) => (typeof v === "number" ? v : 1);
   return factor(n) * factor(largo) * factor(ancho) * factor(alto);
+}
+
+/* ─── Consumo de insumos (receta → insumos) ────────────────────────────────── */
+
+/**
+ * Copia los metadatos del insumo que viajan en cualquier respuesta de consumo.
+ *
+ * Los números llegan de PostgREST como string en algunos casos, así que el
+ * `Number()` va acá una sola vez y no en cada endpoint.
+ *
+ * @param insumo Fila de insumos con sus campos base.
+ */
+export function metadatosInsumo(insumo: Insumo): InsumoConsumoBase {
+  return {
+    insumo_id: insumo.id,
+    nombre: insumo.nombre,
+    unidad_medida: insumo.unidad_medida,
+    tipo: insumo.tipo,
+    precio_unitario: Number(insumo.precio_unitario),
+  };
+}
+
+/**
+ * Consumo de cada ingrediente de una receta para una cantidad física de ítem.
+ *
+ *   cantidad_insumo = cantidad_fisica × cantidad_en_receta
+ *
+ * Es la única implementación de ese producto: la usan la explosión mensual
+ * (donde la cantidad física sale del porcentaje de avance del mes) y el
+ * previsto de certificación (donde sale de la cantidad ejecutada). Lo que
+ * cambia entre las dos es de dónde viene `cantidadFisica`, no la cuenta.
+ *
+ * @param ingredientes Ingredientes de la receta, con el insumo cargado.
+ * @param cantidadFisica Cantidad de ítem sobre la que se calcula el consumo.
+ * @returns Un par insumo/cantidad por ingrediente, en el orden recibido.
+ */
+export function calcularConsumoIngredientes(
+  ingredientes: RecetaConInsumos["ingredientes"],
+  cantidadFisica: number,
+): Array<{ insumo: Insumo; cantidad: number }> {
+  return ingredientes.map((ing) => ({
+    insumo: ing.insumo,
+    cantidad: cantidadFisica * Number(ing.cantidad),
+  }));
 }
 
 /* ─── Conversión a unidad de compra ────────────────────────────────────────── */

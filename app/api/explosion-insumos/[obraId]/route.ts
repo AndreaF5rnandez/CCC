@@ -1,12 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
-import { calcularCantidadTotalItem, resolverCompra } from "@/lib/calculos";
+import {
+  calcularCantidadTotalItem,
+  calcularConsumoIngredientes,
+  metadatosInsumo,
+  resolverCompra,
+} from "@/lib/calculos";
 import { loguearError } from "@/lib/apiError";
 import type {
   Rubro,
   Item,
   Insumo,
   InsumoCompraObra,
+  InsumoConsumoBase,
   RecetaConInsumos,
   Planificacion,
   ExplosionInsumo,
@@ -29,12 +35,7 @@ type OverrideCompra = Pick<
 >;
 
 // Acumulador interno por insumo: metadatos + vector de consumo por mes.
-type AcumInsumo = {
-  insumo_id: string;
-  nombre: string;
-  unidad_medida: string;
-  tipo: Insumo["tipo"];
-  precio_unitario: number;
+type AcumInsumo = InsumoConsumoBase & {
   // Referencia de compra del insumo; el override de la obra se aplica al final.
   unidad_compra: string | null;
   factor_compra: number | null;
@@ -139,11 +140,7 @@ export async function GET(
       let acum = porInsumo.get(insumo.id);
       if (!acum) {
         acum = {
-          insumo_id: insumo.id,
-          nombre: insumo.nombre,
-          unidad_medida: insumo.unidad_medida,
-          tipo: insumo.tipo,
-          precio_unitario: Number(insumo.precio_unitario),
+          ...metadatosInsumo(insumo),
           unidad_compra: insumo.unidad_compra ?? null,
           factor_compra:
             insumo.factor_compra === null || insumo.factor_compra === undefined
@@ -181,10 +178,11 @@ export async function GET(
           if (!pct) continue; // 0 o inválido → no aporta
 
           const cantidadFisica = (pct / 100) * cantidadTotal;
-          for (const ing of ingredientes) {
-            const cantidadInsumo = cantidadFisica * Number(ing.cantidad);
-            const acum = obtenerAcum(ing.insumo);
-            acum.consumo_por_mes[mes - 1] += cantidadInsumo;
+          for (const { insumo, cantidad } of calcularConsumoIngredientes(
+            ingredientes,
+            cantidadFisica,
+          )) {
+            obtenerAcum(insumo).consumo_por_mes[mes - 1] += cantidad;
           }
         }
       }

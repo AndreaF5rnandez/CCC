@@ -279,12 +279,17 @@ export interface CompraResuelta {
   factor_referencia: number | null;
 }
 
-export interface ExplosionInsumo extends CompraResuelta {
+/** Metadatos del insumo que acompañan a cualquier cantidad consumida.
+ *  Compartido por la explosión mensual y el previsto de certificación. */
+export interface InsumoConsumoBase {
   insumo_id: string;
   nombre: string;
   unidad_medida: string;
   tipo: Insumo["tipo"];
   precio_unitario: number;
+}
+
+export interface ExplosionInsumo extends CompraResuelta, InsumoConsumoBase {
   // Consumo del insumo por mes. Longitud = plazo_meses; índice 0 = mes 1.
   // Un mes sin consumo es 0 (nunca se omite), para poder dibujar la grilla completa.
   consumo_por_mes: number[];
@@ -305,4 +310,50 @@ export interface ExplosionInsumosResponse {
  *  tal cual, sin recalcular la precedencia por su cuenta. */
 export interface InsumoCompraObraResponse extends CompraResuelta {
   insumo_id: string;
+}
+
+/* ─── Certificación: material previsto ─────────────────────────────────────── */
+
+/** Un ítem ejecutado, tal como lo manda el frontend.
+ *  Sin `cantidad_ejecutada` se asume el ítem completo (suma de sus mediciones). */
+export interface CertificacionItemEjecutado {
+  item_id: string;
+  cantidad_ejecutada?: number | null;
+}
+
+/** Body de POST /api/certificacion-previsto. */
+export interface CertificacionPrevistoRequest {
+  obra_id: string;
+  items: CertificacionItemEjecutado[];
+}
+
+/** Qué cantidad se terminó usando para cada ítem del pedido.
+ *  Va en la respuesta para que la vista pueda mostrar sobre qué se calculó y
+ *  para que un ítem sin receta se vea, en vez de desaparecer en silencio. */
+export interface CertificacionItemPrevisto {
+  item_id: string;
+  descripcion: string;
+  unidad_medida: string;
+  // Suma de las mediciones del ítem: el 100% del cómputo.
+  cantidad_total: number;
+  // La que se usó para calcular el previsto.
+  cantidad_ejecutada: number;
+  // "informada" = vino en el body; "total" = se asumió el ítem completo.
+  origen_cantidad: "informada" | "total";
+  // false = el ítem no tiene receta o la receta está vacía: no aporta insumos.
+  aporta_insumos: boolean;
+}
+
+/** Un insumo previsto, ya agrupado y sumado a lo largo de todos los ítems. */
+export interface CertificacionInsumoPrevisto extends InsumoConsumoBase {
+  cantidad_prevista: number;
+}
+
+/** Respuesta de POST /api/certificacion-previsto.
+ *  Devuelve los tres tipos de insumo etiquetados; filtrar a solo materiales
+ *  es decisión de la vista, no del backend. */
+export interface CertificacionPrevistoResponse {
+  obra_id: string;
+  items: CertificacionItemPrevisto[];
+  insumos: CertificacionInsumoPrevisto[];
 }
