@@ -357,3 +357,63 @@ export interface CertificacionPrevistoResponse {
   items: CertificacionItemPrevisto[];
   insumos: CertificacionInsumoPrevisto[];
 }
+
+/* ─── Certificación: registro guardado y desvío ────────────────────────────── */
+
+/** Fila de `certificaciones`. */
+export interface Certificacion {
+  id: string;
+  obra_id: string;
+  fecha: string;
+  descripcion: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Material real consumido en una certificación, con el insumo resuelto. */
+export interface CertificacionInsumoReal extends InsumoConsumoBase {
+  cantidad_real: number;
+}
+
+/** De dónde salió cada fila del desvío:
+ *  - "ambos": el insumo estaba previsto y se cargó consumo real.
+ *  - "solo_previsto": estaba previsto y no se cargó consumo (real = 0).
+ *  - "solo_real": se consumió un material que las recetas no contemplaban. */
+export type DesvioOrigen = "ambos" | "solo_previsto" | "solo_real";
+
+/** Desvío de un insumo dentro de una certificación. No se guarda: se calcula
+ *  al momento cruzando el previsto de las recetas contra el real cargado. */
+export interface CertificacionDesvioInsumo extends InsumoConsumoBase {
+  cantidad_prevista: number;
+  cantidad_real: number;
+  // real − previsto. Positivo = se consumió de más.
+  desvio_cantidad: number;
+  // (real − previsto) / previsto × 100.
+  // null = no calculable en porcentaje porque el previsto es 0.
+  desvio_pct: number | null;
+  origen: DesvioOrigen;
+}
+
+/** Una certificación con su detalle y su desvío ya calculado. */
+export interface CertificacionConDesvio extends Certificacion {
+  // Ítems ejecutados, con la cantidad sobre la que se calculó el previsto.
+  items: CertificacionItemPrevisto[];
+  // Material previsto según las recetas de esos ítems.
+  insumos_previstos: CertificacionInsumoPrevisto[];
+  // Material realmente consumido, tal como lo cargó el encargado.
+  insumos_reales: CertificacionInsumoReal[];
+  // Cruce de los dos anteriores. Incluye los tres tipos de insumo etiquetados.
+  desvio: CertificacionDesvioInsumo[];
+}
+
+/** Body de POST /api/certificaciones y de PUT /api/certificaciones/[id].
+ *  En el PUT los hijos se reemplazan enteros, igual que los ingredientes de
+ *  una receta: lo que no venga en las listas se borra. */
+export interface CertificacionRequest {
+  obra_id: string;
+  fecha: string;
+  descripcion?: string | null;
+  // Acepta ids sueltos o el objeto con la cantidad parcial ejecutada.
+  items: Array<string | CertificacionItemEjecutado>;
+  insumos: Array<{ insumo_id: string; cantidad_real: number }>;
+}

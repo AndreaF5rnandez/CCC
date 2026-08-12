@@ -18,6 +18,9 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 | `rubros` | id, obra_id, nombre, orden — CASCADE al eliminar obra |
 | `items` | id, rubro_id, receta_id, descripcion, orden — CASCADE/RESTRICT en receta |
 | `mediciones` | id, item_id, descripcion, n, largo?, ancho?, alto?, **cantidad_calculada** GENERATED |
+| `certificaciones` | id, obra_id, fecha, descripcion? — CASCADE al eliminar obra |
+| `certificacion_items` | id, certificacion_id, item_id, cantidad_ejecutada? (NULL = ítem completo) — UNIQUE (certificacion_id, item_id) |
+| `certificacion_insumos` | id, certificacion_id, insumo_id, cantidad_real — UNIQUE (certificacion_id, insumo_id) |
 
 **Reglas críticas de DB:**
 - `cantidad_calculada` = `n × COALESCE(largo,1) × COALESCE(ancho,1) × COALESCE(alto,1)` — GENERATED ALWAYS, nunca enviarlo desde backend
@@ -42,6 +45,10 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 - `GET/POST /api/mediciones` — GET requiere `?item_id=uuid`
 - `GET/PUT/DELETE /api/mediciones/[id]`
 - `GET /api/presupuesto/[obraId]` — `?gastos_generales=10&beneficio=15&impuestos=21`
+- `POST /api/certificacion-previsto` — material previsto para un set de ítems ejecutados;
+  body `{ obra_id, items: [{ item_id, cantidad_ejecutada? }] }`. NO usa la planificación mensual.
+- `GET/POST /api/certificaciones` — GET requiere `?obra_id=uuid`; trae el desvío calculado
+- `GET/PUT/DELETE /api/certificaciones/[id]` — PUT reemplaza ítems e insumos enteros
 
 ## Hooks
 - `useInsumos(tipo?)`, `useRecetas()`, `useObras(estado?)`, `useMediciones(obraId)`
@@ -79,3 +86,5 @@ pragma-textoClaro:  #7A6A5A
 - Formularios sin `<form>` HTML — usar `onClick`/`onChange`
 - Errores siempre visibles en pantalla, nunca solo en consola
 - El presupuesto no se guarda: se calcula al momento desde mediciones + recetas + insumos
+- El desvío de certificación tampoco se guarda: se calcula al leer, cruzando el previsto de
+  las recetas contra `certificacion_insumos.cantidad_real`
