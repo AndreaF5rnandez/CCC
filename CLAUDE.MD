@@ -22,6 +22,7 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 | `certificacion_items` | id, certificacion_id, item_id, cantidad_ejecutada? (NULL = ítem completo) — UNIQUE (certificacion_id, item_id) |
 | `certificacion_insumos` | id, certificacion_id, insumo_id, cantidad_real — UNIQUE (certificacion_id, insumo_id) |
 | `certificacion_mediciones` | id, certificacion_id, medicion_id — qué mediciones se ejecutaron; UNIQUE (certificacion_id, medicion_id) |
+| `mediciones_reales` | id, certificacion_id, medicion_id, n?, largo?, ancho?, alto?, **cantidad_calculada** GENERATED — medidas con las que salió de verdad cada medición; UNIQUE (certificacion_id, medicion_id); fila opcional: si no hay, salió como se planificó |
 | `compras` | id, obra_id, insumo_id, fecha, cantidad, precio_unitario_compra, proveedor? — cantidad y precio en **unidad de COMPRA**; SIN UNIQUE: varias compras del mismo insumo por obra |
 
 **Reglas críticas de DB:**
@@ -48,11 +49,14 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 - `GET/PUT/DELETE /api/mediciones/[id]`
 - `GET /api/presupuesto/[obraId]` — `?gastos_generales=10&beneficio=15&impuestos=21`
 - `POST /api/certificacion-previsto` — material previsto para un set de ítems ejecutados;
-  body `{ obra_id, items: [{ item_id, cantidad_ejecutada? }] }`. NO usa la planificación mensual.
+  body `{ obra_id, items: [{ item_id, cantidad_ejecutada?, medicion_ids?, medidas_reales? }] }`.
+  NO usa la planificación mensual. Devuelve también `desvio_computo` para previsualizarlo.
 - `GET /api/certificacion-items` — requiere `?obra_id=uuid`; árbol rubro→ítem→mediciones
   + qué mediciones ya se certificaron
-- `GET/POST /api/certificaciones` — GET requiere `?obra_id=uuid`; trae el desvío calculado
-- `GET/PUT/DELETE /api/certificaciones/[id]` — PUT reemplaza ítems e insumos enteros
+- `GET/POST /api/certificaciones` — GET requiere `?obra_id=uuid`; trae el desvío de material
+  y el `desvio_computo` (por medición, por ítem y agrupado por rubro), ambos calculados
+- `GET/PUT/DELETE /api/certificaciones/[id]` — PUT reemplaza ítems, insumos, mediciones
+  ejecutadas y medidas reales enteros
 - `GET/POST /api/compras` — GET requiere `?obra_id=uuid`; devuelve `{ obra_id, compras, consolidado }`
   con el desvío de PRECIO por compra y el consolidado por insumo (promedio ponderado)
 - `GET/PUT/DELETE /api/compras/[id]` — PUT no permite mover la compra de obra
@@ -99,6 +103,13 @@ pragma-textoClaro:  #7A6A5A
 - El presupuesto no se guarda: se calcula al momento desde mediciones + recetas + insumos
 - El desvío de certificación tampoco se guarda: se calcula al leer, cruzando el previsto de
   las recetas contra `certificacion_insumos.cantidad_real`
+- El desvío de CÓMPUTO tampoco se guarda: se calcula al leer, comparando
+  `mediciones.cantidad_calculada` (planificado) contra `mediciones_reales.cantidad_calculada`
+  (real). Las medidas reales NO modifican el cómputo original ni el presupuesto
+- Cuando una medición tiene medida real, el previsto de MATERIAL de su ítem se calcula sobre
+  la cantidad REAL (una pared más larga lleva más ladrillos). El ajuste no se persiste:
+  `certificacion_items.cantidad_ejecutada` guarda siempre la cantidad del cómputo y el ajuste
+  se recalcula al leer
 - El desvío de PRECIO tampoco se guarda: se calcula al leer, comparando
   `compras.precio_unitario_compra` contra `insumos.precio_unitario × factor_compra`
 - La conversión a unidad de compra sale SIEMPRE de `resolverCompra()` (`lib/calculos.ts`):

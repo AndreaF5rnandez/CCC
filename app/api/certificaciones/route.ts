@@ -6,6 +6,7 @@ import {
   calcularPrevistoConItems,
   detectarInsumosInexistentes,
   insertarHijosCertificacion,
+  resolverMedidasReales,
   validarPayloadCertificacion,
 } from "@/lib/certificacion";
 import { loguearError } from "@/lib/apiError";
@@ -50,11 +51,18 @@ export async function GET(request: NextRequest) {
  *
  * Body: {
  *   obra_id, fecha, descripcion?,
- *   items:   [item_id | { item_id, cantidad_ejecutada? }],
+ *   items:   [item_id | {
+ *              item_id, cantidad_ejecutada?, medicion_ids?,
+ *              medidas_reales?: [{ medicion_id, n?, largo?, ancho?, alto? }]
+ *            }],
  *   insumos: [{ insumo_id, cantidad_real }]
  * }
  *
- * Escribe en las tres tablas. Supabase no expone transacciones desde el
+ * `medidas_reales` es opcional y parcial: solo las mediciones que salieron
+ * distinto de como se midieron. Cada una tiene que estar en `medicion_ids` del
+ * mismo ítem; una dimensión que no venga se hereda del cómputo.
+ *
+ * Escribe en las cuatro tablas hijas. Supabase no expone transacciones desde el
  * cliente JS, así que si falla alguno de los hijos se borra la certificación
  * recién creada (el CASCADE se lleva lo que haya entrado) y no queda una
  * cabecera huérfana. No es un rollback real: si además fallara ese borrado,
@@ -104,6 +112,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // ── Medidas reales: mediciones del ítem y realmente ejecutadas ──
+    const medidasReales = resolverMedidasReales(items, itemsPorId);
+    if (!medidasReales.ok) {
+      return NextResponse.json({ error: medidasReales.error }, { status: 400 });
+    }
+
     // ── Los insumos tienen que existir ──────────────────────────────
     const insumosInexistentes = await detectarInsumosInexistentes(
       supabase,
@@ -138,6 +152,7 @@ export async function POST(request: NextRequest) {
       certificacion.id,
       items,
       insumos,
+      medidasReales.filas,
     );
 
     if (errorHijos) {

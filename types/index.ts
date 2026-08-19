@@ -319,10 +319,32 @@ export interface InsumoCompraObraResponse extends CompraResuelta {
 export interface CertificacionItemEjecutado {
   item_id: string;
   cantidad_ejecutada?: number | null;
-  /** Qué mediciones del ítem se ejecutaron. Solo se usa al guardar (tabla
-   *  `certificacion_mediciones`): el cálculo del previsto trabaja con
-   *  `cantidad_ejecutada`, que ya viene sumada. */
+  /** Qué mediciones del ítem se ejecutaron (tabla `certificacion_mediciones`).
+   *  El previsto trabaja con `cantidad_ejecutada`, que ya viene sumada; esta
+   *  lista dice CUÁLES paredes son, y es la que habilita cargar medidas reales. */
   medicion_ids?: string[];
+  /** Medidas con las que salieron DE VERDAD algunas de esas mediciones.
+   *  Opcional y parcial: solo las que difieren del cómputo. Cada `medicion_id`
+   *  tiene que estar en `medicion_ids` — no se aceptan medidas reales de una
+   *  medición que no se certificó. */
+  medidas_reales?: MedidaRealEntrada[];
+}
+
+/** Medidas reales de UNA medición, tal como las manda el frontend.
+ *
+ *  Las dimensiones son parciales a propósito:
+ *  - campo ausente (`undefined`) → se hereda la del cómputo original;
+ *  - campo en `null` → se borra (queda NULL en la base, y COALESCE la toma
+ *    como 1, igual que en `mediciones`).
+ *
+ *  Sin esta herencia, corregir solo el largo dejaría el ancho y el alto en
+ *  NULL y la cantidad real saldría mal. */
+export interface MedidaRealEntrada {
+  medicion_id: string;
+  n?: number | null;
+  largo?: number | null;
+  ancho?: number | null;
+  alto?: number | null;
 }
 
 /** Body de POST /api/certificacion-previsto. */
@@ -340,8 +362,18 @@ export interface CertificacionItemPrevisto {
   unidad_medida: string;
   // Suma de las mediciones del ítem: el 100% del cómputo.
   cantidad_total: number;
-  // La que se usó para calcular el previsto.
+  // La que se usó para calcular el previsto de material. Es
+  // cantidad_planificada + ajuste_medidas_reales.
   cantidad_ejecutada: number;
+  /** Lo ejecutado SEGÚN EL CÓMPUTO: la cantidad informada en el body, o el
+   *  ítem completo si no vino ninguna. Es la que se guarda en
+   *  `certificacion_items.cantidad_ejecutada`; el ajuste por medidas reales no
+   *  se persiste, se recalcula al leer. */
+  cantidad_planificada: number;
+  /** Cuánto corrieron las medidas reales a la cantidad de este ítem
+   *  (Σ real − planificada sobre sus mediciones con medida real cargada).
+   *  0 = no hay medidas reales, o se compensaron entre sí. */
+  ajuste_medidas_reales: number;
   // "informada" = vino en el body; "total" = se asumió el ítem completo.
   origen_cantidad: "informada" | "total";
   // false = el ítem no tiene receta o la receta está vacía: no aporta insumos.
@@ -365,6 +397,87 @@ export interface CertificacionPrevistoResponse {
   obra_id: string;
   items: CertificacionItemPrevisto[];
   insumos: CertificacionInsumoPrevisto[];
+  /** Desvío de cómputo de las medidas reales que vinieron en el body, para
+   *  previsualizarlo antes de guardar. Vacío si no se mandó ninguna. */
+  desvio_computo: CertificacionDesvioComputo;
+}
+
+/* ─── Certificación: desvío de CÓMPUTO (planificado vs medida real) ────────── */
+
+/** Un juego de dimensiones y la cantidad que sale de ellas.
+ *  `cantidad` = n × COALESCE(largo,1) × COALESCE(ancho,1) × COALESCE(alto,1),
+ *  la misma fórmula de la columna generada en `mediciones`. */
+export interface MedidasComputo {
+  n: number;
+  largo: number | null;
+  ancho: number | null;
+  alto: number | null;
+  cantidad: number;
+}
+
+/** Desvío de cómputo de UNA medición ejecutada: cómo se midió contra cómo
+ *  salió. No se guarda — se calcula al leer, cruzando
+ *  `mediciones.cantidad_calculada` contra `mediciones_reales.cantidad_calculada`.
+ *
+ *  Sin medida real cargada, `real` es null y la cantidad real se asume igual a
+ *  la planificada: el desvío da 0, que es justamente "salió como se midió". */
+export interface CertificacionMedicionDesvio {
+  medicion_id: string;
+  item_id: string;
+  rubro_id: string;
+  rubro_nombre: string;
+  // Descripción de la medición en el cómputo ("Pared 5").
+  descripcion: string;
+  // Unidad del ítem al que pertenece (m2, m3, u...).
+  unidad_medida: string;
+  planificada: MedidasComputo;
+  // null = el encargado no corrigió esta medición.
+  real: MedidasComputo | null;
+  cantidad_planificada: number;
+  // Igual a la planificada cuando no hay medida real cargada.
+  cantidad_real: number;
+  // real − planificada. Positivo = salió más grande de lo medido.
+  desvio_cantidad: number;
+  // null = la planificada es 0 y el porcentaje no es calculable.
+  desvio_pct: number | null;
+}
+
+/** Desvío de cómputo consolidado por ítem. Sumar acá es legítimo: todas las
+ *  mediciones de un ítem comparten unidad. Solo cuenta las mediciones
+ *  ejecutadas en ESTA certificación, no el ítem entero. */
+export interface CertificacionDesvioComputoItem {
+  item_id: string;
+  descripcion: string;
+  unidad_medida: string;
+  rubro_id: string;
+  rubro_nombre: string;
+  // Mediciones ejecutadas en esta certificación / cuántas tienen medida real.
+  mediciones: number;
+  mediciones_con_medida_real: number;
+  cantidad_planificada: number;
+  cantidad_real: number;
+  desvio_cantidad: number;
+  desvio_pct: number | null;
+}
+
+/** Agrupación por rubro. A propósito NO trae un total de cantidad: un rubro
+ *  mezcla ítems en m2, m3 y u, y sumarlos daría un número sin significado
+ *  físico. La consolidación en plata es tarea de la vista consolidada. */
+export interface CertificacionDesvioComputoRubro {
+  rubro_id: string;
+  rubro_nombre: string;
+  items: CertificacionDesvioComputoItem[];
+  // Ítems con desvío distinto de cero, para ordenar y resumir en la vista.
+  items_con_desvio: number;
+}
+
+/** Desvío de cómputo completo de una certificación, en sus tres niveles. */
+export interface CertificacionDesvioComputo {
+  mediciones: CertificacionMedicionDesvio[];
+  items: CertificacionDesvioComputoItem[];
+  rubros: CertificacionDesvioComputoRubro[];
+  // Cuántas mediciones ejecutadas tienen medida real cargada.
+  mediciones_con_medida_real: number;
 }
 
 /* ─── Certificación: árbol de selección (rubro → ítem → mediciones) ────────── */
@@ -463,6 +576,11 @@ export interface CertificacionConDesvio extends Certificacion {
   insumos_reales: CertificacionInsumoReal[];
   // Cruce de los dos anteriores. Incluye los tres tipos de insumo etiquetados.
   desvio: CertificacionDesvioInsumo[];
+  /** Desvío de CÓMPUTO: qué se midió contra qué salió, por medición, por ítem
+   *  y agrupado por rubro. Independiente del desvío de material, pero no
+   *  aislado: cuando una medición tiene medida real, el previsto de material
+   *  de su ítem se calcula sobre la cantidad REAL (ver `insumos_previstos`). */
+  desvio_computo: CertificacionDesvioComputo;
 }
 
 /** Body de POST /api/certificaciones y de PUT /api/certificaciones/[id].
@@ -472,7 +590,8 @@ export interface CertificacionRequest {
   obra_id: string;
   fecha: string;
   descripcion?: string | null;
-  // Acepta ids sueltos o el objeto con la cantidad parcial ejecutada.
+  // Acepta ids sueltos o el objeto con la cantidad parcial ejecutada, las
+  // mediciones ejecutadas y, opcionalmente, sus medidas reales.
   items: Array<string | CertificacionItemEjecutado>;
   insumos: Array<{ insumo_id: string; cantidad_real: number }>;
 }

@@ -2,6 +2,7 @@
 // next/headers al runtime de quien importe las funciones puras de este módulo.
 import type { createSupabaseServerClient } from "./supabaseServer";
 import {
+  calcularCantidadMedicion,
   calcularCantidadTotalItem,
   calcularConsumoIngredientes,
   metadatosInsumo,
@@ -15,33 +16,58 @@ import type {
   RecetaConInsumos,
   Certificacion,
   CertificacionConDesvio,
+  CertificacionDesvioComputo,
+  CertificacionDesvioComputoItem,
+  CertificacionDesvioComputoRubro,
   CertificacionItemEjecutado,
   CertificacionItemPrevisto,
   CertificacionInsumoPrevisto,
   CertificacionInsumoReal,
   CertificacionDesvioInsumo,
+  CertificacionMedicionDesvio,
+  MedidaRealEntrada,
+  MedidasComputo,
 } from "../types";
 
 type SupabaseServer = ReturnType<typeof createSupabaseServerClient>;
 
+/** Una medición del cómputo, con las dimensiones que necesita el desvío de
+ *  cómputo para mostrar "se midió 4 × 13,70 × 0,20 × 3,00". */
+export type MedicionParaComputo = {
+  id: string;
+  descripcion: string;
+  n: number;
+  largo: number | null;
+  ancho: number | null;
+  alto: number | null;
+  cantidad_calculada: number;
+};
+
 /** Un ítem con lo necesario para calcular su previsto: la receta y las
- *  mediciones de las que sale su cantidad total. */
+ *  mediciones de las que sale su cantidad total.
+ *
+ *  Las mediciones vienen con id y dimensiones (no solo la cantidad) porque el
+ *  desvío de cómputo las necesita para cruzarlas contra las medidas reales, y
+ *  el rubro viaja con nombre para poder agrupar sin una consulta más. */
 export type ItemParaPrevisto = Pick<
   Item,
   "id" | "descripcion" | "unidad_medida"
 > & {
+  rubro: { id: string; nombre: string; obra_id: string } | null;
   receta: RecetaConInsumos | null;
-  mediciones: Array<{ cantidad_calculada: number }>;
+  mediciones: MedicionParaComputo[];
 };
 
 // Shape crudo que devuelve PostgREST para el select de abajo.
-type ItemPrevistoRaw = ItemParaPrevisto & { rubro: { obra_id: string } | null };
+type ItemPrevistoRaw = ItemParaPrevisto;
 
 const ITEM_PREVISTO_SELECT = `
   id,
   descripcion,
   unidad_medida,
   rubro:rubros!inner (
+    id,
+    nombre,
     obra_id
   ),
   receta:recetas (
@@ -52,6 +78,12 @@ const ITEM_PREVISTO_SELECT = `
     )
   ),
   mediciones (
+    id,
+    descripcion,
+    n,
+    largo,
+    ancho,
+    alto,
     cantidad_calculada
   )
 `;
@@ -99,16 +131,25 @@ export async function cargarItemsParaPrevisto(
  * Es pura: recibe los ítems ya cargados. Así el endpoint de previsto y el
  * listado de certificaciones comparten la cuenta sin repetir consultas.
  *
+ * MEDIDAS REALES: si una medición del ítem salió distinta de como se midió, la
+ * cantidad que se usa acá es la REAL, no la del cómputo. Una pared más larga
+ * lleva más ladrillos, y el desvío de material tiene que medir el consumo, no
+ * el error de medición. El ajuste llega ya sumado por ítem en `ajustesPorItem`
+ * (lo calcula `calcularDesvioComputo`) y NO se persiste: se recalcula al leer.
+ *
  * @param pedidos Ítems ejecutados; sin `cantidad_ejecutada` se toma el completo.
  * @param itemsPorId Ítems ya cargados con `cargarItemsParaPrevisto`.
  * @param overrides Overrides de compra de la obra, para resolver el factor con
  *   la misma precedencia que la explosión. Sin overrides vale la referencia.
+ * @param ajustesPorItem item_id → Σ (real − planificada) de sus mediciones con
+ *   medida real. Vacío = nadie corrigió medidas y el previsto sale del cómputo.
  * @returns Detalle por ítem, insumos agrupados, y los ids que no se encontraron.
  */
 export function calcularPrevistoConItems(
   pedidos: CertificacionItemEjecutado[],
   itemsPorId: Map<string, ItemParaPrevisto>,
   overrides: Map<string, OverrideCompra> = new Map(),
+  ajustesPorItem: Map<string, number> = new Map(),
 ): {
   items: CertificacionItemPrevisto[];
   insumos: CertificacionInsumoPrevisto[];
@@ -135,7 +176,14 @@ export function calcularPrevistoConItems(
         : Number(pedido.cantidad_ejecutada);
 
     // Sin cantidad informada se ejecuta el ítem completo.
-    const cantidadEjecutada = pedida === undefined ? cantidadTotal : pedida;
+    const cantidadPlanificada = pedida === undefined ? cantidadTotal : pedida;
+
+    // El ajuste ya viene con signo: negativo si las paredes salieron más
+    // chicas. No puede bajar de 0 porque cada medición aporta como mucho
+    // −planificada, pero se acota igual: una cantidad negativa daría un
+    // previsto negativo, que no significa nada.
+    const ajuste = ajustesPorItem.get(item.id) ?? 0;
+    const cantidadEjecutada = Math.max(0, cantidadPlanificada + ajuste);
 
     const ingredientes = item.receta?.ingredientes ?? [];
     const aportaInsumos = ingredientes.length > 0;
@@ -146,6 +194,8 @@ export function calcularPrevistoConItems(
       unidad_medida: item.unidad_medida,
       cantidad_total: cantidadTotal,
       cantidad_ejecutada: cantidadEjecutada,
+      cantidad_planificada: cantidadPlanificada,
+      ajuste_medidas_reales: cantidadEjecutada - cantidadPlanificada,
       origen_cantidad: pedida === undefined ? "total" : "informada",
       aporta_insumos: aportaInsumos,
     });
@@ -273,6 +323,419 @@ export function calcularDesvio(
   return Array.from(porInsumo.values()).sort(ordenarPorTipoYNombre);
 }
 
+/* ─── Desvío de CÓMPUTO (medida planificada vs medida real) ───────────────── */
+
+/** Una fila de `mediciones_reales` ya normalizada.
+ *
+ *  `cantidad_calculada` es la columna GENERATED cuando la fila viene de la
+ *  base, y el cálculo en JS con la misma fórmula cuando todavía no se guardó
+ *  (la previsualización del endpoint de previsto). Nunca se INSERTA. */
+export interface MedidaRealResuelta {
+  medicion_id: string;
+  n: number | null;
+  largo: number | null;
+  ancho: number | null;
+  alto: number | null;
+  cantidad_calculada: number | null;
+}
+
+/** Fila lista para insertar en `mediciones_reales`: sin `cantidad_calculada`,
+ *  que la calcula la base. */
+export interface FilaMedicionReal {
+  medicion_id: string;
+  n: number | null;
+  largo: number | null;
+  ancho: number | null;
+  alto: number | null;
+}
+
+function aNumeroONulo(valor: unknown): number | null {
+  if (valor === null || valor === undefined) return null;
+  const numero = Number(valor);
+  return Number.isFinite(numero) ? numero : null;
+}
+
+/** Dimensiones + cantidad de un juego de medidas, para que la vista muestre
+ *  "4 × 13,70 × 0,20 × 3,00 = 32,88" sin recalcular nada. */
+function armarMedidas(
+  n: number | null,
+  largo: number | null,
+  ancho: number | null,
+  alto: number | null,
+  cantidadGuardada: number | null,
+): MedidasComputo {
+  // `n` en NULL solo puede venir de una fila cargada a mano: el backend
+  // siempre lo escribe. Se toma como 1, igual que hace COALESCE con el resto.
+  const cantidadN = n ?? 1;
+  return {
+    n: cantidadN,
+    largo,
+    ancho,
+    alto,
+    cantidad:
+      cantidadGuardada !== null && Number.isFinite(cantidadGuardada)
+        ? cantidadGuardada
+        : calcularCantidadMedicion(
+            cantidadN,
+            largo ?? undefined,
+            ancho ?? undefined,
+            alto ?? undefined,
+          ),
+  };
+}
+
+/**
+ * Desvío de cómputo de una certificación: qué se midió contra qué salió.
+ *
+ * Es pura y sirve a los dos caminos: la lectura de una certificación guardada
+ * (las medidas reales salen de `mediciones_reales`) y la previsualización
+ * antes de guardar (salen del body). Así el número de la pantalla de Registrar
+ * y el del Histórico no pueden discrepar.
+ *
+ * Solo entran las mediciones que el ítem declaró como ejecutadas
+ * (`medicion_ids`). Un ítem certificado sin detalle de mediciones —el
+ * comportamiento anterior a la migración 012— no aporta filas: no hay contra
+ * qué comparar. Una medición borrada del cómputo después de certificar
+ * tampoco: se saltea en vez de romper la lectura.
+ *
+ * Sin medida real, la cantidad real se asume igual a la planificada y el
+ * desvío da 0. Ausencia de fila = "salió como se midió", no dato faltante.
+ *
+ * @param pedidos Ítems ejecutados, con sus `medicion_ids`.
+ * @param itemsPorId Ítems ya cargados con `cargarItemsParaPrevisto`.
+ * @param reales medicion_id → medidas reales cargadas.
+ * @returns El desvío en sus tres niveles y el ajuste por ítem que consume
+ *   `calcularPrevistoConItems` para recalcular el previsto de material.
+ */
+export function calcularDesvioComputo(
+  pedidos: CertificacionItemEjecutado[],
+  itemsPorId: Map<string, ItemParaPrevisto>,
+  reales: Map<string, MedidaRealResuelta>,
+): { desvio: CertificacionDesvioComputo; ajustesPorItem: Map<string, number> } {
+  const mediciones: CertificacionMedicionDesvio[] = [];
+  const ajustesPorItem = new Map<string, number>();
+
+  for (const pedido of pedidos) {
+    const item = itemsPorId.get(pedido.item_id);
+    if (!item || !pedido.medicion_ids || pedido.medicion_ids.length === 0) {
+      continue;
+    }
+
+    const medicionesDelItem = new Map(item.mediciones.map((m) => [m.id, m]));
+
+    for (const medicionId of pedido.medicion_ids) {
+      const planificadaCruda = medicionesDelItem.get(medicionId);
+      // La medición ya no existe en el cómputo (se borró después de
+      // certificar): no hay planificado contra el cual comparar.
+      if (!planificadaCruda) continue;
+
+      const planificada = armarMedidas(
+        aNumeroONulo(planificadaCruda.n),
+        aNumeroONulo(planificadaCruda.largo),
+        aNumeroONulo(planificadaCruda.ancho),
+        aNumeroONulo(planificadaCruda.alto),
+        aNumeroONulo(planificadaCruda.cantidad_calculada),
+      );
+
+      const realCruda = reales.get(medicionId);
+      const real = realCruda
+        ? armarMedidas(
+            aNumeroONulo(realCruda.n),
+            aNumeroONulo(realCruda.largo),
+            aNumeroONulo(realCruda.ancho),
+            aNumeroONulo(realCruda.alto),
+            aNumeroONulo(realCruda.cantidad_calculada),
+          )
+        : null;
+
+      // Sin medida real, salió como se midió.
+      const cantidadReal = real ? real.cantidad : planificada.cantidad;
+      const desvioCantidad = cantidadReal - planificada.cantidad;
+
+      mediciones.push({
+        medicion_id: medicionId,
+        item_id: item.id,
+        rubro_id: item.rubro?.id ?? "",
+        rubro_nombre: item.rubro?.nombre ?? "",
+        descripcion: planificadaCruda.descripcion,
+        unidad_medida: item.unidad_medida,
+        planificada,
+        real,
+        cantidad_planificada: planificada.cantidad,
+        cantidad_real: cantidadReal,
+        desvio_cantidad: desvioCantidad,
+        // Sin planificado no hay base contra la cual medir un porcentaje.
+        desvio_pct:
+          planificada.cantidad > 0
+            ? (desvioCantidad / planificada.cantidad) * 100
+            : null,
+      });
+
+      if (real) {
+        ajustesPorItem.set(
+          item.id,
+          (ajustesPorItem.get(item.id) ?? 0) + desvioCantidad,
+        );
+      }
+    }
+  }
+
+  const items = consolidarPorItem(mediciones, itemsPorId);
+
+  return {
+    desvio: {
+      mediciones,
+      items,
+      rubros: agruparPorRubro(items),
+      mediciones_con_medida_real: mediciones.filter((m) => m.real !== null)
+        .length,
+    },
+    ajustesPorItem,
+  };
+}
+
+/** Suma las mediciones de cada ítem. Es legítimo sumar acá: todas comparten la
+ *  unidad del ítem. */
+function consolidarPorItem(
+  mediciones: CertificacionMedicionDesvio[],
+  itemsPorId: Map<string, ItemParaPrevisto>,
+): CertificacionDesvioComputoItem[] {
+  const porItem = new Map<string, CertificacionDesvioComputoItem>();
+
+  for (const fila of mediciones) {
+    let acum = porItem.get(fila.item_id);
+    if (!acum) {
+      acum = {
+        item_id: fila.item_id,
+        descripcion: itemsPorId.get(fila.item_id)?.descripcion ?? "",
+        unidad_medida: fila.unidad_medida,
+        rubro_id: fila.rubro_id,
+        rubro_nombre: fila.rubro_nombre,
+        mediciones: 0,
+        mediciones_con_medida_real: 0,
+        cantidad_planificada: 0,
+        cantidad_real: 0,
+        desvio_cantidad: 0,
+        desvio_pct: null,
+      };
+      porItem.set(fila.item_id, acum);
+    }
+
+    acum.mediciones += 1;
+    if (fila.real !== null) acum.mediciones_con_medida_real += 1;
+    acum.cantidad_planificada += fila.cantidad_planificada;
+    acum.cantidad_real += fila.cantidad_real;
+  }
+
+  for (const acum of porItem.values()) {
+    acum.desvio_cantidad = acum.cantidad_real - acum.cantidad_planificada;
+    acum.desvio_pct =
+      acum.cantidad_planificada > 0
+        ? (acum.desvio_cantidad / acum.cantidad_planificada) * 100
+        : null;
+  }
+
+  return Array.from(porItem.values());
+}
+
+/** Agrupa los ítems por rubro. Sin total de cantidad: un rubro mezcla m2, m3 y
+ *  u, y esa suma no significaría nada. */
+function agruparPorRubro(
+  items: CertificacionDesvioComputoItem[],
+): CertificacionDesvioComputoRubro[] {
+  const porRubro = new Map<string, CertificacionDesvioComputoRubro>();
+
+  for (const item of items) {
+    const acum = porRubro.get(item.rubro_id);
+    if (acum) {
+      acum.items.push(item);
+    } else {
+      porRubro.set(item.rubro_id, {
+        rubro_id: item.rubro_id,
+        rubro_nombre: item.rubro_nombre,
+        items: [item],
+        items_con_desvio: 0,
+      });
+    }
+  }
+
+  for (const rubro of porRubro.values()) {
+    rubro.items_con_desvio = rubro.items.filter(
+      (item) => item.desvio_cantidad !== 0,
+    ).length;
+  }
+
+  return Array.from(porRubro.values());
+}
+
+/**
+ * Valida y completa las medidas reales de un pedido contra el cómputo.
+ *
+ * Dos reglas que no se pueden chequear sin ir a la base, y por eso viven acá y
+ * no en `validarPayloadCertificacion`:
+ *
+ *  1. La medición tiene que pertenecer al ítem.
+ *  2. La medición tiene que estar entre las EJECUTADAS de ese ítem. No se
+ *     acepta la medida real de una pared que no se certificó.
+ *
+ * Además hereda del cómputo cada dimensión que no vino: corregir solo el largo
+ * no puede dejar el ancho y el alto en NULL, porque COALESCE los tomaría como
+ * 1 y la cantidad real saldría de otro planeta. Un `null` explícito sí borra.
+ *
+ * @returns Las filas listas para insertar (sin `cantidad_calculada`, que es
+ *   GENERATED) o el mensaje de error para la pantalla.
+ */
+export function resolverMedidasReales(
+  pedidos: CertificacionItemEjecutado[],
+  itemsPorId: Map<string, ItemParaPrevisto>,
+):
+  | { ok: true; filas: FilaMedicionReal[] }
+  | { ok: false; error: string } {
+  const filas: FilaMedicionReal[] = [];
+
+  for (const pedido of pedidos) {
+    const medidas = pedido.medidas_reales ?? [];
+    if (medidas.length === 0) continue;
+
+    const item = itemsPorId.get(pedido.item_id);
+    if (!item) {
+      return {
+        ok: false,
+        error: `El ítem ${pedido.item_id} no existe o no pertenece a la obra`,
+      };
+    }
+
+    const ejecutadas = new Set(pedido.medicion_ids ?? []);
+    const medicionesDelItem = new Map(item.mediciones.map((m) => [m.id, m]));
+
+    for (const medida of medidas) {
+      const planificada = medicionesDelItem.get(medida.medicion_id);
+      if (!planificada) {
+        return {
+          ok: false,
+          error:
+            `La medición ${medida.medicion_id} no pertenece al ítem ` +
+            `"${item.descripcion}"`,
+        };
+      }
+
+      if (!ejecutadas.has(medida.medicion_id)) {
+        return {
+          ok: false,
+          error:
+            `No se pueden cargar medidas reales de "${planificada.descripcion}": ` +
+            `esa medición no está entre las ejecutadas del ítem "${item.descripcion}"`,
+        };
+      }
+
+      // Dimensión ausente = la del cómputo; null explícito = se borra.
+      const heredar = (
+        valor: number | null | undefined,
+        delComputo: number | null,
+      ) => (valor === undefined ? delComputo : aNumeroONulo(valor));
+
+      filas.push({
+        medicion_id: medida.medicion_id,
+        n: heredar(medida.n, aNumeroONulo(planificada.n)),
+        largo: heredar(medida.largo, aNumeroONulo(planificada.largo)),
+        ancho: heredar(medida.ancho, aNumeroONulo(planificada.ancho)),
+        alto: heredar(medida.alto, aNumeroONulo(planificada.alto)),
+      });
+    }
+  }
+
+  return { ok: true, filas };
+}
+
+/** Las mismas filas, ya con la cantidad calculada en JS, para previsualizar el
+ *  desvío antes de guardar. Replica la columna GENERATED; la base sigue siendo
+ *  la fuente de verdad una vez guardado. */
+export function aMedidasResueltas(
+  filas: FilaMedicionReal[],
+): Map<string, MedidaRealResuelta> {
+  return new Map(
+    filas.map((fila) => [
+      fila.medicion_id,
+      {
+        ...fila,
+        cantidad_calculada: calcularCantidadMedicion(
+          fila.n ?? 1,
+          fila.largo ?? undefined,
+          fila.ancho ?? undefined,
+          fila.alto ?? undefined,
+        ),
+      },
+    ]),
+  );
+}
+
+/**
+ * Valida la forma de `medidas_reales` de un ítem (sin ir a la base).
+ *
+ * La pertenencia y la herencia de dimensiones las resuelve
+ * `resolverMedidasReales`, que sí necesita el cómputo cargado.
+ */
+export function validarMedidasRealesEntrada(
+  crudo: unknown,
+  itemId: string,
+): { ok: true; medidas: MedidaRealEntrada[] } | { ok: false; error: string } {
+  if (!Array.isArray(crudo)) {
+    return {
+      ok: false,
+      error: `Las medidas reales del ítem ${itemId} tienen que ser una lista`,
+    };
+  }
+
+  const medidas: MedidaRealEntrada[] = [];
+  const vistas = new Set<string>();
+
+  for (const entrada of crudo as Array<Record<string, unknown>>) {
+    const medicionId = entrada?.medicion_id;
+    if (typeof medicionId !== "string" || medicionId.trim() === "") {
+      return {
+        ok: false,
+        error: `Cada medida real del ítem ${itemId} tiene que traer un medicion_id`,
+      };
+    }
+
+    // Una medición con dos juegos de medidas reales sería ambiguo, y el UNIQUE
+    // (certificacion_id, medicion_id) lo rechazaría igual desde la base.
+    if (vistas.has(medicionId)) {
+      return {
+        ok: false,
+        error: `La medición ${medicionId} tiene medidas reales repetidas`,
+      };
+    }
+    vistas.add(medicionId);
+
+    const medida: MedidaRealEntrada = { medicion_id: medicionId };
+
+    for (const campo of ["n", "largo", "ancho", "alto"] as const) {
+      const valor = entrada[campo];
+      if (valor === undefined) continue;
+      if (valor === null || valor === "") {
+        medida[campo] = null;
+        continue;
+      }
+
+      const numero = Number(valor);
+      if (!Number.isFinite(numero) || numero < 0) {
+        return {
+          ok: false,
+          error:
+            `El ${campo} real de la medición ${medicionId} tiene que ser un ` +
+            `número mayor o igual a 0`,
+        };
+      }
+      medida[campo] = numero;
+    }
+
+    medidas.push(medida);
+  }
+
+  return { ok: true, medidas };
+}
+
 /* ─── Validación del payload (compartida por POST y PUT) ───────────────────── */
 
 /** Payload ya normalizado: fecha limpia, ítems como objetos y cantidades numéricas. */
@@ -384,9 +847,23 @@ export function validarPayloadCertificacion(
       medicionIds = Array.from(vistas);
     }
 
+    // Medidas reales (opcional): con qué medidas salieron de verdad algunas de
+    // esas mediciones. Que pertenezcan al ítem y estén entre las ejecutadas se
+    // chequea contra la base, en `resolverMedidasReales`.
+    let medidasReales: MedidaRealEntrada[] | undefined;
+    if (crudo && crudo.medidas_reales !== undefined && crudo.medidas_reales !== null) {
+      const validadas = validarMedidasRealesEntrada(crudo.medidas_reales, itemId);
+      if (!validadas.ok) return { ok: false, error: validadas.error };
+      medidasReales = validadas.medidas;
+    }
+
     const cruda = crudo?.cantidad_ejecutada;
     if (cruda === undefined || cruda === null) {
-      items.push({ item_id: itemId, medicion_ids: medicionIds });
+      items.push({
+        item_id: itemId,
+        medicion_ids: medicionIds,
+        medidas_reales: medidasReales,
+      });
       continue;
     }
 
@@ -397,7 +874,12 @@ export function validarPayloadCertificacion(
         error: `La cantidad ejecutada del ítem ${itemId} tiene que ser un número mayor o igual a 0`,
       };
     }
-    items.push({ item_id: itemId, cantidad_ejecutada: cantidad, medicion_ids: medicionIds });
+    items.push({
+      item_id: itemId,
+      cantidad_ejecutada: cantidad,
+      medicion_ids: medicionIds,
+      medidas_reales: medidasReales,
+    });
   }
 
   // ── Material real consumido ───────────────────────────────────────
@@ -491,6 +973,106 @@ let faltaCantidadEjecutada = false;
 // Ídem para la tabla certificacion_mediciones (migración 012).
 let faltaTablaMediciones = false;
 
+// Ídem para la tabla mediciones_reales (migración 014).
+let faltaTablaMedidasReales = false;
+
+/**
+ * Qué mediciones se ejecutaron en cada certificación.
+ *
+ * Va en su propia consulta y no anidada en el select de certificaciones para
+ * que, si falta la migración 012, el error caiga acá y no se lleve puesta la
+ * lectura entera: sin este dato el desvío de material sigue estando bien.
+ *
+ * @returns certificacion_id → ids de medición. Vacío si falta la tabla.
+ */
+async function cargarMedicionesCertificadas(
+  supabase: SupabaseServer,
+  certificacionIds: string[],
+): Promise<Map<string, Set<string>>> {
+  const porCertificacion = new Map<string, Set<string>>();
+  if (certificacionIds.length === 0 || faltaTablaMediciones) {
+    return porCertificacion;
+  }
+
+  const { data, error } = await supabase
+    .from("certificacion_mediciones")
+    .select("certificacion_id, medicion_id")
+    .in("certificacion_id", certificacionIds);
+
+  if (error) {
+    if (error.code !== "42P01") throw error;
+    faltaTablaMediciones = true;
+    console.warn(
+      "[certificacion] Falta la tabla certificacion_mediciones: ejecutá " +
+        "supabase/migrations/012_certificacion_mediciones.sql. " +
+        "Sin ella no hay desvío de cómputo.",
+    );
+    return porCertificacion;
+  }
+
+  for (const fila of data ?? []) {
+    const set = porCertificacion.get(fila.certificacion_id) ?? new Set<string>();
+    set.add(fila.medicion_id);
+    porCertificacion.set(fila.certificacion_id, set);
+  }
+
+  return porCertificacion;
+}
+
+/**
+ * Medidas reales cargadas en cada certificación.
+ *
+ * Misma consulta aparte y misma degradación que arriba: sin la migración 014
+ * el módulo entero sigue funcionando, solo que ninguna medición tiene medida
+ * real y todo el desvío de cómputo da 0.
+ *
+ * `cantidad_calculada` se LEE (es GENERATED); nunca se escribe.
+ *
+ * @returns certificacion_id → (medicion_id → medidas reales).
+ */
+async function cargarMedidasReales(
+  supabase: SupabaseServer,
+  certificacionIds: string[],
+): Promise<Map<string, Map<string, MedidaRealResuelta>>> {
+  const porCertificacion = new Map<string, Map<string, MedidaRealResuelta>>();
+  if (certificacionIds.length === 0 || faltaTablaMedidasReales) {
+    return porCertificacion;
+  }
+
+  const { data, error } = await supabase
+    .from("mediciones_reales")
+    .select("certificacion_id, medicion_id, n, largo, ancho, alto, cantidad_calculada")
+    .in("certificacion_id", certificacionIds);
+
+  if (error) {
+    if (error.code !== "42P01") throw error;
+    faltaTablaMedidasReales = true;
+    console.warn(
+      "[certificacion] Falta la tabla mediciones_reales: ejecutá " +
+        "supabase/migrations/014_mediciones_reales.sql. " +
+        "Hasta entonces no se puede registrar el desvío de cómputo.",
+    );
+    return porCertificacion;
+  }
+
+  for (const fila of data ?? []) {
+    const mapa =
+      porCertificacion.get(fila.certificacion_id) ??
+      new Map<string, MedidaRealResuelta>();
+    mapa.set(fila.medicion_id, {
+      medicion_id: fila.medicion_id,
+      n: aNumeroONulo(fila.n),
+      largo: aNumeroONulo(fila.largo),
+      ancho: aNumeroONulo(fila.ancho),
+      alto: aNumeroONulo(fila.alto),
+      cantidad_calculada: aNumeroONulo(fila.cantidad_calculada),
+    });
+    porCertificacion.set(fila.certificacion_id, mapa);
+  }
+
+  return porCertificacion;
+}
+
 /**
  * Trae certificaciones con su detalle y su desvío ya calculado.
  *
@@ -551,6 +1133,18 @@ export async function cargarCertificacionesConDesvio(
     itemIdsPorObra.set(cert.obra_id, set);
   }
 
+  // Las mediciones ejecutadas y sus medidas reales, también en una consulta
+  // para todas las certificaciones a la vez.
+  const certificacionIds = certificaciones.map((cert) => cert.id);
+  const medicionesPorCert = await cargarMedicionesCertificadas(
+    supabase,
+    certificacionIds,
+  );
+  const medidasRealesPorCert = await cargarMedidasReales(
+    supabase,
+    certificacionIds,
+  );
+
   const itemsPorObra = new Map<string, Map<string, ItemParaPrevisto>>();
   const overridesPorObra = new Map<string, Map<string, OverrideCompra>>();
   for (const [obraId, ids] of itemIdsPorObra) {
@@ -566,19 +1160,41 @@ export async function cargarCertificacionesConDesvio(
   }
 
   return certificaciones.map((cert) => {
-    const itemsPorId = itemsPorObra.get(cert.obra_id) ?? new Map();
-    const overrides = overridesPorObra.get(cert.obra_id) ?? new Map();
+    const itemsPorId =
+      itemsPorObra.get(cert.obra_id) ?? new Map<string, ItemParaPrevisto>();
+    const overrides =
+      overridesPorObra.get(cert.obra_id) ?? new Map<string, OverrideCompra>();
+
+    // `certificacion_mediciones` guarda las mediciones sueltas, sin decir de
+    // qué ítem son: se reparten cruzándolas contra las mediciones de cada ítem.
+    const certificadas = medicionesPorCert.get(cert.id) ?? new Set<string>();
 
     const pedidos: CertificacionItemEjecutado[] = cert.items.map((it) => ({
       item_id: it.item_id,
       // null = ítem completo.
       cantidad_ejecutada: it.cantidad_ejecutada ?? undefined,
+      medicion_ids: (itemsPorId.get(it.item_id)?.mediciones ?? [])
+        .map((m) => m.id)
+        .filter((id) => certificadas.has(id)),
     }));
+
+    // Desvío de CÓMPUTO primero: su ajuste por ítem entra en el previsto de
+    // material, porque una pared que salió más grande lleva más ladrillos.
+    const { desvio: desvioComputo, ajustesPorItem } = calcularDesvioComputo(
+      pedidos,
+      itemsPorId,
+      medidasRealesPorCert.get(cert.id) ?? new Map(),
+    );
 
     // Acá los faltantes se ignoran a propósito: al leer lo ya guardado, un
     // ítem que no resuelve no es culpa de quien consulta. Al guardar sí es
     // error, y eso lo valida el route handler.
-    const previsto = calcularPrevistoConItems(pedidos, itemsPorId, overrides);
+    const previsto = calcularPrevistoConItems(
+      pedidos,
+      itemsPorId,
+      overrides,
+      ajustesPorItem,
+    );
 
     // Un insumo borrado deja la fila huérfana sin poder resolverse: se saltea
     // en vez de romper la lectura de toda la certificación.
@@ -613,6 +1229,7 @@ export async function cargarCertificacionesConDesvio(
       insumos_previstos: previsto.insumos,
       insumos_reales: insumosReales,
       desvio,
+      desvio_computo: desvioComputo,
     };
   });
 }
@@ -624,6 +1241,8 @@ export async function cargarCertificacionesConDesvio(
  * los hijos viejos), que es el mismo enfoque de reemplazo total que usa el PUT
  * de recetas con sus ingredientes.
  *
+ * @param medidasReales Filas ya resueltas por `resolverMedidasReales`. Nunca
+ *   traen `cantidad_calculada`: esa columna es GENERATED y la calcula la base.
  * @returns El mensaje de error si algo falló, o null si salió todo bien.
  */
 export async function insertarHijosCertificacion(
@@ -631,6 +1250,7 @@ export async function insertarHijosCertificacion(
   certificacionId: string,
   items: CertificacionItemEjecutado[],
   insumos: Array<{ insumo_id: string; cantidad_real: number }>,
+  medidasReales: FilaMedicionReal[] = [],
 ): Promise<string | null> {
   const filasItems = items.map((item) => ({
     certificacion_id: certificacionId,
@@ -700,6 +1320,37 @@ export async function insertarHijosCertificacion(
         "[certificacion] Falta la tabla certificacion_mediciones: ejecutá " +
           "supabase/migrations/012_certificacion_mediciones.sql. " +
           "Las certificaciones se guardan, pero no marcan las mediciones ya ejecutadas.",
+      );
+    }
+  }
+
+  // Medidas reales. Solo las mediciones que el encargado corrigió: las que
+  // salieron como se midieron no generan fila.
+  if (medidasReales.length > 0 && !faltaTablaMedidasReales) {
+    const { error: errorMedidas } = await supabase
+      .from("mediciones_reales")
+      .insert(
+        medidasReales.map((fila) => ({
+          certificacion_id: certificacionId,
+          medicion_id: fila.medicion_id,
+          n: fila.n,
+          largo: fila.largo,
+          ancho: fila.ancho,
+          alto: fila.alto,
+          // cantidad_calculada NO va: es GENERATED ALWAYS.
+        })),
+      );
+
+    // 42P01 = falta correr la migración 014. Misma degradación que arriba: la
+    // certificación se guarda igual y lo único que se pierde es el desvío de
+    // cómputo, que no se persiste de todos modos.
+    if (errorMedidas) {
+      if (errorMedidas.code !== "42P01") return errorMedidas.message;
+      faltaTablaMedidasReales = true;
+      console.warn(
+        "[certificacion] Falta la tabla mediciones_reales: ejecutá " +
+          "supabase/migrations/014_mediciones_reales.sql. " +
+          "Las certificaciones se guardan, pero las medidas reales se descartan.",
       );
     }
   }

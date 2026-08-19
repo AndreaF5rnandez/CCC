@@ -6,9 +6,11 @@ import {
   calcularPrevistoConItems,
   detectarInsumosInexistentes,
   insertarHijosCertificacion,
+  resolverMedidasReales,
   validarPayloadCertificacion,
 } from "@/lib/certificacion";
 import { loguearError } from "@/lib/apiError";
+import type { CertificacionItemEjecutado } from "@/types";
 
 /**
  * GET /api/certificaciones/[id]
@@ -41,7 +43,8 @@ export async function GET(
 /**
  * PUT /api/certificaciones/[id]
  *
- * Edita fecha, descripción, ítems ejecutados y material real.
+ * Edita fecha, descripción, ítems ejecutados, material real y las medidas
+ * reales de las mediciones ejecutadas.
  *
  * Los hijos se reemplazan enteros (borrar y recrear), igual que hace el PUT de
  * recetas con sus ingredientes: lo que no venga en las listas se borra. La
@@ -106,6 +109,12 @@ export async function PUT(
       );
     }
 
+    // ── Medidas reales: mediciones del ítem y realmente ejecutadas ──
+    const medidasReales = resolverMedidasReales(items, itemsPorId);
+    if (!medidasReales.ok) {
+      return NextResponse.json({ error: medidasReales.error }, { status: 400 });
+    }
+
     const insumosInexistentes = await detectarInsumosInexistentes(
       supabase,
       insumos.map((i) => i.insumo_id),
@@ -152,11 +161,24 @@ export async function PUT(
       throw errorBorrarMediciones;
     }
 
+    // Las medidas reales cuelgan de la certificación, no de
+    // certificacion_mediciones: el CASCADE de arriba no se las lleva, hay que
+    // borrarlas aparte. Si falta la migración 014, no hay nada que borrar.
+    const { error: errorBorrarMedidasReales } = await supabase
+      .from("mediciones_reales")
+      .delete()
+      .eq("certificacion_id", params.id);
+
+    if (errorBorrarMedidasReales && errorBorrarMedidasReales.code !== "42P01") {
+      throw errorBorrarMedidasReales;
+    }
+
     const errorHijos = await insertarHijosCertificacion(
       supabase,
       params.id,
       items,
       insumos,
+      medidasReales.filas,
     );
 
     if (errorHijos) {
@@ -225,6 +247,10 @@ export async function DELETE(
 /**
  * Vuelve a dejar la certificación como estaba antes de una edición fallida.
  *
+ * Restaura las cuatro tablas hijas, incluidas las mediciones ejecutadas y sus
+ * medidas reales: el estado anterior se reconstruye desde el desvío de cómputo
+ * que ya trae la lectura, sin volver a consultar.
+ *
  * @returns El mensaje de error si la restauración falló, o null si salió bien.
  */
 async function restaurarEstadoAnterior(
@@ -237,28 +263,62 @@ async function restaurarEstadoAnterior(
     .update({ fecha: anterior.fecha, descripcion: anterior.descripcion })
     .eq("id", certificacionId);
 
-  await supabase
-    .from("certificacion_items")
-    .delete()
-    .eq("certificacion_id", certificacionId);
-  await supabase
-    .from("certificacion_insumos")
-    .delete()
-    .eq("certificacion_id", certificacionId);
+  // Se borra todo lo que haya quedado del intento fallido antes de recrear:
+  // si no, el UNIQUE de mediciones y medidas reales rechazaría la restauración.
+  for (const tabla of [
+    "certificacion_items",
+    "certificacion_insumos",
+    "certificacion_mediciones",
+    "mediciones_reales",
+  ]) {
+    await supabase.from(tabla).delete().eq("certificacion_id", certificacionId);
+  }
+
+  // Qué mediciones tenía cada ítem y cuáles traían medida real.
+  const medicionesPorItem = new Map<string, string[]>();
+  const medidasReales: Array<{
+    medicion_id: string;
+    n: number | null;
+    largo: number | null;
+    ancho: number | null;
+    alto: number | null;
+  }> = [];
+
+  for (const fila of anterior.desvio_computo.mediciones) {
+    const ids = medicionesPorItem.get(fila.item_id) ?? [];
+    ids.push(fila.medicion_id);
+    medicionesPorItem.set(fila.item_id, ids);
+
+    if (fila.real) {
+      medidasReales.push({
+        medicion_id: fila.medicion_id,
+        n: fila.real.n,
+        largo: fila.real.largo,
+        ancho: fila.real.ancho,
+        alto: fila.real.alto,
+      });
+    }
+  }
+
+  const items: CertificacionItemEjecutado[] = anterior.items.map((item) => ({
+    item_id: item.item_id,
+    // Se restaura la cantidad del CÓMPUTO, no la ajustada por medidas reales:
+    // el ajuste no se persiste, se recalcula al leer. Guardar la ajustada lo
+    // aplicaría dos veces. Y solo era parcial si el origen lo dice.
+    cantidad_ejecutada:
+      item.origen_cantidad === "informada" ? item.cantidad_planificada : null,
+    medicion_ids: medicionesPorItem.get(item.item_id),
+  }));
 
   const errorHijos = await insertarHijosCertificacion(
     supabase,
     certificacionId,
-    anterior.items.map((item) => ({
-      item_id: item.item_id,
-      // Al leer se resolvió a un número; solo era parcial si el origen lo dice.
-      cantidad_ejecutada:
-        item.origen_cantidad === "informada" ? item.cantidad_ejecutada : null,
-    })),
+    items,
     anterior.insumos_reales.map((insumo) => ({
       insumo_id: insumo.insumo_id,
       cantidad_real: insumo.cantidad_real,
     })),
+    medidasReales,
   );
 
   const detalles = [errorCabecera?.message, errorHijos].filter(Boolean);

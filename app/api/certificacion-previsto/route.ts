@@ -1,14 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabaseServer";
 import {
+  aMedidasResueltas,
   cargarItemsParaPrevisto,
+  calcularDesvioComputo,
   calcularPrevistoConItems,
+  resolverMedidasReales,
+  validarMedidasRealesEntrada,
 } from "@/lib/certificacion";
 import { cargarOverridesCompra } from "@/lib/compra";
 import { loguearError } from "@/lib/apiError";
 import type {
   CertificacionItemEjecutado,
   CertificacionPrevistoResponse,
+  MedidaRealEntrada,
 } from "@/types";
 
 /**
@@ -82,9 +87,32 @@ export async function POST(request: NextRequest) {
       }
       vistos.add(itemId);
 
+      // Medidas reales (opcional): permiten previsualizar el previsto sobre la
+      // cantidad REAL antes de guardar, con la misma cuenta que hará la
+      // lectura después. Necesitan saber qué mediciones se ejecutaron.
+      let medidasReales: MedidaRealEntrada[] | undefined;
+      if (entrada.medidas_reales !== undefined && entrada.medidas_reales !== null) {
+        const validadas = validarMedidasRealesEntrada(
+          entrada.medidas_reales,
+          itemId,
+        );
+        if (!validadas.ok) {
+          return NextResponse.json({ error: validadas.error }, { status: 400 });
+        }
+        medidasReales = validadas.medidas;
+      }
+
+      const medicionIds = Array.isArray(entrada.medicion_ids)
+        ? entrada.medicion_ids
+        : undefined;
+
       const cruda = entrada.cantidad_ejecutada;
       if (cruda === undefined || cruda === null) {
-        pedidos.push({ item_id: itemId });
+        pedidos.push({
+          item_id: itemId,
+          medicion_ids: medicionIds,
+          medidas_reales: medidasReales,
+        });
         continue;
       }
 
@@ -98,7 +126,12 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         );
       }
-      pedidos.push({ item_id: itemId, cantidad_ejecutada: cantidad });
+      pedidos.push({
+        item_id: itemId,
+        cantidad_ejecutada: cantidad,
+        medicion_ids: medicionIds,
+        medidas_reales: medidasReales,
+      });
     }
 
     // ── La obra tiene que existir (y ser del usuario: lo filtra el RLS) ──
@@ -127,7 +160,26 @@ export async function POST(request: NextRequest) {
       "POST /api/certificacion-previsto",
     );
 
-    const previsto = calcularPrevistoConItems(pedidos, itemsPorId, overrides);
+    // ── Desvío de cómputo, si vinieron medidas reales ───────────────
+    // Va antes del previsto porque su ajuste entra en la cuenta del material:
+    // una pared que salió más grande lleva más ladrillos.
+    const medidas = resolverMedidasReales(pedidos, itemsPorId);
+    if (!medidas.ok) {
+      return NextResponse.json({ error: medidas.error }, { status: 400 });
+    }
+
+    const { desvio: desvioComputo, ajustesPorItem } = calcularDesvioComputo(
+      pedidos,
+      itemsPorId,
+      aMedidasResueltas(medidas.filas),
+    );
+
+    const previsto = calcularPrevistoConItems(
+      pedidos,
+      itemsPorId,
+      overrides,
+      ajustesPorItem,
+    );
 
     // Un item_id que no aparece es un error del que llama (ítem inexistente o
     // de otra obra), no un ítem que "no aporta nada": se avisa, no se ignora.
@@ -146,6 +198,7 @@ export async function POST(request: NextRequest) {
       obra_id,
       items: previsto.items,
       insumos: previsto.insumos,
+      desvio_computo: desvioComputo,
     };
 
     return NextResponse.json(response, { status: 200 });
