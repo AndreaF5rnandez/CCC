@@ -74,7 +74,10 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 - `app/obras/[id]/page.tsx` — hub de obra con links a Cómputo y Presupuesto
 - `app/obras/[id]/medicion/page.tsx` — cómputo métrico con rubros, ítems y mediciones inline
 - `app/recetas/page.tsx` — construida
-- `app/obras/[id]/certificacion/page.tsx` — sub-solapas Registrar, Histórico y Compras y precios
+- `app/obras/[id]/certificacion/page.tsx` — dos sub-solapas: Certificaciones y Compras y precios
+- `components/obras/certificacion/` — `VistaCertificaciones` (botón "Nueva" + lista),
+  `FormularioCertificacion` (crea Y edita, con medidas reales por medición),
+  `TarjetaCertificacion` (desvío de material + de cómputo), `severidad` (chips y avisos)
 - `components/obras/VistaCompras.tsx` — registro de compras + desvío de precio consolidado
 - `components/ui/estiloPragma.ts` (tokens glass) y `lib/formato.ts` (números, fechas, unidades)
   son compartidos: no volver a definirlos dentro de una página

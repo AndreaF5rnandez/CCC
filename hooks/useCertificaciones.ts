@@ -117,6 +117,28 @@ export function useCertificaciones(obraId: string) {
     [obraId],
   );
 
+  /**
+   * Edita una certificación existente. El PUT reemplaza los hijos enteros
+   * (ítems, mediciones ejecutadas, medidas reales y material), así que la vista
+   * manda siempre el estado completo, no un parche.
+   */
+  const actualizarCertificacion = useCallback(
+    async (id: string, datos: NuevaCertificacion): Promise<CertificacionConDesvio> => {
+      const res = await fetch(`/api/certificaciones/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(datos),
+      });
+      const actualizada = await leerJson<CertificacionConDesvio>(
+        res,
+        'Error al guardar los cambios de la certificación',
+      );
+      setLista((prev) => prev.map((c) => (c.id === id ? actualizada : c)));
+      return actualizada;
+    },
+    [],
+  );
+
   const eliminarCertificacion = useCallback(async (id: string): Promise<void> => {
     const res = await fetch(`/api/certificaciones/${id}`, { method: 'DELETE' });
     await leerJson<{ message: string }>(res, 'Error al eliminar la certificación');
@@ -130,6 +152,7 @@ export function useCertificaciones(obraId: string) {
     recargar,
     calcularPrevisto,
     crearCertificacion,
+    actualizarCertificacion,
     eliminarCertificacion,
   };
 }
