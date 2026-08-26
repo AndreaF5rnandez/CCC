@@ -36,7 +36,10 @@ export const COLOR_SEVERIDAD: Record<
 > = {
   de_mas: { texto: ROJO, fondo: ROJO_FONDO, etiqueta: 'de más' },
   de_menos: { texto: VERDE, fondo: VERDE_FONDO, etiqueta: 'de menos' },
-  en_linea: { texto: VERDE, fondo: 'rgba(34, 197, 94, 0.10)', etiqueta: 'en línea' },
+  /* Dentro de tolerancia va GRIS, no verde: un "+92" verde se lee como buena
+   * noticia cuando en realidad es "no pasó nada". El verde queda reservado
+   * para lo que sí es una noticia: se consumió MENOS de lo previsto. */
+  en_linea: { texto: TEXTO_2, fondo: GRIS_FONDO, etiqueta: 'en línea' },
   no_previsto: { texto: AMBAR, fondo: AMBAR_FONDO, etiqueta: 'no previsto' },
   sin_consumo: { texto: TEXTO_2, fondo: GRIS_FONDO, etiqueta: 'sin consumo' },
 };

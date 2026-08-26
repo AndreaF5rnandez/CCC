@@ -105,10 +105,31 @@ export function unidadDeCarga(fila: ConUnidad): UnidadDeCarga {
   return { unidad: fila.unidad_medida, factor: 1, convertido: false };
 }
 
+/* Unidades que son SÍMBOLO y no palabra: no se pluralizan nunca. "20 m3", no
+ * "20 m3s"; "10.108 u", no "10.108 us". La pluralización existe por la unidad
+ * de COMPRA, que es texto libre que el usuario escribe ("bolsa", "barra",
+ * "rollo"); la unidad base sale de una lista de símbolos y hay que dejarla en
+ * paz. */
+const UNIDADES_SIMBOLO = new Set([
+  'm', 'm2', 'm3', 'cm', 'cm2', 'cm3', 'dm3', 'km', 'kg', 't', 'l', 'ml',
+  'u', 'h', 'd', 'a', 'ha', 'mu', 'cu', 'gl',
+]);
+
+/** Las pocas unidades que sí son palabra y no pluralizan con una "s" pelada. */
+const PLURALES_IRREGULARES: Record<string, string> = { mes: 'meses' };
+
 /** Pluralización simple: la unidad de compra es texto libre ("bolsa", "barra"). */
 export function pluralizar(cantidad: number, unidad: string): string {
-  if (Math.abs(cantidad) === 1 || unidad.endsWith('s')) return unidad;
-  return `${unidad}s`;
+  const limpia = unidad.trim();
+  const clave = limpia.toLowerCase();
+
+  if (Math.abs(cantidad) === 1) return limpia;
+  if (PLURALES_IRREGULARES[clave]) return PLURALES_IRREGULARES[clave];
+  // Los símbolos y cualquier unidad con dígitos (m2, 1/2") quedan como están.
+  if (UNIDADES_SIMBOLO.has(clave) || /\d/.test(clave)) return limpia;
+  if (clave.endsWith('s')) return limpia;
+
+  return `${limpia}s`;
 }
 
 /** Acepta coma o punto como separador decimal; vacío devuelve null. */
