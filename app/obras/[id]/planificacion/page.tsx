@@ -523,6 +523,10 @@ function CurvaAcumulada({
   etiquetas: string[];
   total: number;
 }) {
+  /** Qué porcentaje de la obra es un monto. La curva está en plata, pero la
+   *  pregunta que uno se hace mirándola es "¿cuánto llevo hecho?", y eso se
+   *  contesta en porcentaje. */
+  const pctDeObra = (monto: number) => (total > 0 ? (monto / total) * 100 : 0);
   const ref = useRef<HTMLDivElement>(null);
   const [ancho, setAncho] = useState(760);
 
@@ -584,7 +588,7 @@ function CurvaAcumulada({
           Curva de inversión acumulada
         </h3>
         <span className="text-xs" style={{ color: '#6B7080' }}>
-          Costo-costo · acumulado mes a mes
+          Costo-costo · acumulado y % de la obra
         </span>
       </div>
       <div ref={ref} style={{ width: '100%' }}>
@@ -630,9 +634,31 @@ function CurvaAcumulada({
 
           {puntos.map((p) => (
             <circle key={p.i} cx={p.cx} cy={p.cy} r={3} fill="#2A3300">
-              <title>{`${etiquetas[p.i]}: ${formatPrecio(p.v)}`}</title>
+              <title>
+                {`${etiquetas[p.i]}: ${formatPrecio(p.v)} acumulado · ` +
+                  `${formatPct1(pctDeObra(p.v))} de la obra · ` +
+                  `en el mes ${formatPct1(pctDeObra(montoPorMes[p.i] ?? 0))}`}
+              </title>
             </circle>
           ))}
+
+          {/* El % acumulado sobre cada punto: es el número que se busca al
+              mirar la curva, y tenerlo escrito ahorra el hover. */}
+          {puntos.map((p) =>
+            p.i % pasoEtiqueta === 0 || p.i === n - 1 ? (
+              <text
+                key={`pct-${p.i}`}
+                x={p.cx}
+                y={p.cy - 9}
+                textAnchor="middle"
+                fontSize="10"
+                fontWeight={600}
+                fill="#2A3300"
+              >
+                {formatPct1(pctDeObra(p.v))}
+              </text>
+            ) : null,
+          )}
 
           {puntos.map((p) =>
             p.i % pasoEtiqueta === 0 || p.i === n - 1 ? (
@@ -1193,6 +1219,16 @@ function Grilla({
                   }}
                 >
                   {formatPrecio(calc.montoPorMes[mes - 1])}
+                  {/* Qué tajada de la obra es ese mes. Es la lectura que
+                      importa para planificar: "en el mes 2 hago el 28%". */}
+                  <span
+                    className="block"
+                    style={{ fontSize: '10px', fontWeight: 500, color: '#6B7080' }}
+                  >
+                    {datos.total_costo_costo > 0
+                      ? formatPct1((calc.montoPorMes[mes - 1] / datos.total_costo_costo) * 100)
+                      : '—'}
+                  </span>
                 </td>
               ))}
               <td

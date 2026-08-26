@@ -60,11 +60,15 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
 - `GET/POST /api/compras` — GET requiere `?obra_id=uuid`; devuelve `{ obra_id, compras, consolidado }`
   con el desvío de PRECIO por compra y el consolidado por insumo (promedio ponderado)
 - `GET/PUT/DELETE /api/compras/[id]` — PUT no permite mover la compra de obra
+- `GET /api/control/[obraId]` — control de obra: los tres desvíos en PLATA (cascada que
+  cierra exacta), avance certificado vs planificado por mes, y los cortes por rubro y
+  por material. Cruza planificación + certificación + compras en una sola pasada
 
 ## Hooks
 - `useInsumos(tipo?)`, `useRecetas()`, `useObras(estado?)`, `useMediciones(obraId)`
 - `useRubros(obraId)`, `useItems(rubroId)` (nuevos)
 - Todos exponen: `lista, cargando, error, crear*, actualizar*, eliminar*`
+- `useControlObra(obraId)` — trae `GET /api/control/[obraId]` (solo lectura); expone `datos, cargando, error, recargar`
 - `usePresupuesto(obraId)` — trae `GET /api/presupuesto/[obraId]` completo (solo lectura, sin CRUD); expone `lista, cargando, error`
 
 ## Estado actual del frontend
@@ -79,6 +83,9 @@ Sistema de presupuestación de obras de construcción. Reemplaza Excel/Presto/Da
   `FormularioCertificacion` (crea Y edita, con medidas reales por medición),
   `TarjetaCertificacion` (desvío de material + de cómputo), `severidad` (chips y avisos)
 - `components/obras/VistaCompras.tsx` — registro de compras + desvío de precio consolidado
+- `app/obras/[id]/control/page.tsx` — pestaña Control: la vista de dirección de obra
+- `components/obras/control/` — `ResumenControl` (tiles + cascada), `CurvaAvance` (plan vs
+  certificado vs gastado), `TablasControl` (por rubro y por material)
 - `components/ui/estiloPragma.ts` (tokens glass) y `lib/formato.ts` (números, fechas, unidades)
   son compartidos: no volver a definirlos dentro de una página
 
@@ -115,5 +122,14 @@ pragma-textoClaro:  #7A6A5A
   se recalcula al leer
 - El desvío de PRECIO tampoco se guarda: se calcula al leer, comparando
   `compras.precio_unitario_compra` contra `insumos.precio_unitario × factor_compra`
+- Los tres desvíos se encadenan y la suma CIERRA EXACTA:
+  `material presupuestado + desvío de cómputo + desvío de material + desvío de precio = costo real`.
+  Cierra sin doble conteo porque el previsto de material ya se calcula sobre la cantidad real,
+  y porque el desvío de precio se valoriza sobre lo CONSUMIDO (no sobre lo comprado; la plata
+  comprada y sin usar se informa aparte, en la caja)
+- La cascada corre SOLO sobre materiales: es lo único con consumo real cargado. La mano de obra
+  certificada se informa al lado, marcada como sin control
+- El avance contra el plan se mide con la cantidad del CÓMPUTO (el plan está escrito como % del
+  cómputo). Lo que la obra creció por medidas reales va en su propia línea, no infla el avance
 - La conversión a unidad de compra sale SIEMPRE de `resolverCompra()` (`lib/calculos.ts`):
   la usan la explosión, la certificación y las compras, para que los números coincidan

@@ -10,13 +10,22 @@ import Link from 'next/link';
  * cambio y las cuatro no se desincronicen.
  */
 
-export type ObraTabId = 'medicion' | 'presupuesto' | 'planificacion' | 'certificacion';
+export type ObraTabId =
+  | 'medicion'
+  | 'presupuesto'
+  | 'planificacion'
+  | 'certificacion'
+  | 'control';
 
+/* Orden = el ciclo de vida de la obra: se computa, se presupuesta, se
+ * planifica, se ejecuta y se controla. Control va última porque lee de las
+ * cuatro anteriores. */
 const TABS: { id: ObraTabId; label: string; href: (obraId: string) => string }[] = [
   { id: 'medicion', label: 'Cómputo', href: (id) => `/obras/${id}/medicion` },
   { id: 'presupuesto', label: 'Presupuesto', href: (id) => `/obras/${id}/presupuesto` },
   { id: 'planificacion', label: 'Planificación', href: (id) => `/obras/${id}/planificacion` },
   { id: 'certificacion', label: 'Certificación', href: (id) => `/obras/${id}/certificacion` },
+  { id: 'control', label: 'Control', href: (id) => `/obras/${id}/control` },
 ];
 
 export function ObraTabs({

@@ -697,3 +697,141 @@ export interface CompraRequest {
   precio_unitario_compra: number;
   proveedor?: string | null;
 }
+/* ─── Control de obra: los tres desvíos en plata ───────────────────────────── */
+
+/** Un mes de la obra con las tres curvas: lo que se planificó hacer, lo que se
+ *  certificó y lo que salió de caja. Los acumulados vienen calculados para que
+ *  la curva no los recalcule. */
+export interface ControlMes {
+  mes: number;
+  // "Ago 2026" con fecha de inicio cargada; "Mes 3" si no hay.
+  etiqueta: string;
+  plan: number;
+  certificado: number;
+  gastado: number;
+  plan_acum: number;
+  certificado_acum: number;
+  gastado_acum: number;
+  // El mes en el que estamos hoy, para marcar el corte en la curva.
+  es_actual: boolean;
+  // Si el mes entra en el período que se está mirando. La curva dibuja la obra
+  // entera igual: el período se sombrea, no recorta el eje.
+  en_rango: boolean;
+}
+
+/** El período que se está mirando, en meses de obra. Todo lo que la pantalla
+ *  muestra —tiles, cascada y tablas— está calculado sobre este recorte; la
+ *  curva es la única que muestra siempre la obra completa. */
+export interface ControlRango {
+  desde: number;
+  hasta: number;
+  /** Cómo lo eligió el usuario, para que la pantalla lo diga en palabras. */
+  etiqueta: string;
+}
+
+/**
+ * La cascada: cómo se llega del presupuesto de lo certificado al costo real.
+ *
+ *   base_material + desvío de cómputo + desvío de material + desvío de precio
+ *   = costo_real
+ *
+ * Cierra exacta y sin doble conteo porque el previsto de material ya se calcula
+ * sobre la cantidad REAL de cada medición: el crecimiento de la pared se cobra
+ * una sola vez, en el escalón de cómputo, y el de material mide solo rendimiento.
+ *
+ * Corre SOLO sobre materiales: es lo único de lo que hay consumo real cargado.
+ */
+export interface ControlCascada {
+  // Material presupuestado para las cantidades del cómputo.
+  base_material: number;
+  // Las mediciones salieron distintas: más (o menos) material a precio de lista.
+  desvio_computo: number;
+  // Se consumió más (o menos) de lo que la receta pedía para esa cantidad real.
+  desvio_material: number;
+  // Se pagó distinto a lo presupuestado, valorizado sobre lo CONSUMIDO.
+  desvio_precio: number;
+  // Lo que costaron de verdad los materiales consumidos.
+  costo_real: number;
+  // costo_real − base_material, y su porcentaje sobre la base.
+  desvio_total: number;
+  desvio_total_pct: number | null;
+}
+
+/** Desvío de cómputo por rubro, en plata. En m² y m³ los rubros no se pueden
+ *  sumar; en pesos sí, y por eso este corte existe solo acá. */
+export interface ControlRubro {
+  rubro_id: string;
+  rubro_nombre: string;
+  // Lo certificado del rubro a precio de lista completo (los tres tipos).
+  certificado_monto: number;
+  // Lo que corrió el alcance por medidas reales, valorizado en material.
+  desvio_computo_monto: number;
+  desvio_computo_pct: number | null;
+  items_certificados: number;
+}
+
+/** Un material con sus dos desvíos en plata: el de consumo y el de precio. */
+export interface ControlMaterial extends InsumoConsumoBase, CompraResuelta {
+  // Todo en unidad BASE, como se guarda.
+  previsto: number;
+  consumido: number;
+  desvio_material_monto: number;
+  // Precio realmente pagado por unidad base (promedio ponderado de las compras).
+  // null = no hay ninguna compra registrada de este insumo.
+  precio_real: number | null;
+  desvio_precio_monto: number;
+  // Compras de la obra, en unidad de compra y en plata.
+  comprado_cantidad: number;
+  comprado_monto: number;
+}
+
+/** Respuesta de GET /api/control/[obraId]: todo lo que muestra la pestaña de
+ *  Control, calculado en una sola pasada para que las cuatro piezas de la
+ *  pantalla no puedan contar cosas distintas. */
+export interface ControlObraResponse {
+  obra_id: string;
+  obra_nombre: string;
+  fecha_inicio: string | null;
+  plazo_meses: number | null;
+  // Costo-costo de la obra entera, los tres tipos de insumo.
+  total_presupuesto: number;
+  // En qué mes de la obra estamos hoy. null si no hay fecha de inicio cargada.
+  mes_actual: number | null;
+  meses_totales: number;
+  // null cuando la obra no tiene fecha de inicio: sin ella no hay meses y se
+  // muestra todo junto.
+  rango: ControlRango | null;
+  avance: {
+    // Acumulado hasta el mes actual, según la planificación mensual.
+    plan_monto: number;
+    plan_pct: number;
+    // Lo certificado hasta hoy, medido contra el CÓMPUTO (así se compara con
+    // el plan, que está escrito como % del cómputo).
+    certificado_monto: number;
+    certificado_pct: number;
+    // Aparte: cuánto creció la obra respecto de lo computado. No infla el
+    // avance, se informa al lado.
+    crecimiento_alcance_monto: number;
+    // Lo que suma el plan de TODA la obra (no solo el período). Si es menor que
+    // total_presupuesto, hay ítems sin porcentajes cargados.
+    plan_total_obra: number;
+  };
+  cascada: ControlCascada;
+  // Mano de obra y equipo certificados. Se informan, pero no hay consumo real
+  // cargado para ellos: todavía no se controlan.
+  mano_obra_certificada: number;
+  caja: {
+    // Plata que salió por compras.
+    comprado: number;
+    // Costo de lo consumido, a precio real.
+    consumido: number;
+    // comprado − consumido. Positivo = material en el obrador sin usar.
+    diferencia: number;
+  };
+  meses: ControlMes[];
+  rubros: ControlRubro[];
+  materiales: ControlMaterial[];
+  /** Lo que la pantalla tiene que aclarar: falta la fecha de inicio, hay
+   *  material consumido sin compra registrada, etc. */
+  avisos: string[];
+}
